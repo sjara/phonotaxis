@@ -1,2 +1,2 @@
-# multispeaker
-Presenting sounds from more that two speakers
+# phonotaxis
+Modules for developing a sound localization task.
