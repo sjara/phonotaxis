@@ -4,7 +4,7 @@ channels:
   - defaults
 dependencies:
   - python>=3.9
-  - pyqt
+  - pyqt>=6
   - opencv
   - python-sounddevice
   - pyserial
