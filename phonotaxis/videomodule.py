@@ -49,6 +49,9 @@ class VideoThread(QThread):
         self.save_to = save_to
         self.initialize_camera()
 
+    def set_threshold(self, threshold):
+        self.threshold = threshold
+        
     def set_tracking_params(self, threshold=DEFAULT_BLACK_THRESHOLD,
                             min_area=AREA_THRESHOLD):
         """

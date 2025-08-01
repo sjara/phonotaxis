@@ -3,8 +3,9 @@ Graphical interface utilities.
 """
 
 import sys
-from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QMessageBox
-from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QMessageBox, QSlider
+from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
 
 
@@ -14,6 +15,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Phonotaxis task")
         self.setGeometry(100, 100, 800, 600)
         self.setWindowIcon(self.create_icon())
+        self.current_threshold = 10
         self.init_ui()
         
     def create_icon(self):
@@ -41,6 +43,8 @@ class MainWindow(QMainWindow):
                                        "border-radius: 10px;")
         self.layout.addWidget(self.video_label)
 
+        #self.add_threshold_slider()
+        
         self.status_label = QLabel("Monitoring video feed...")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("font-size: 20px; font-weight: bold;" +
@@ -48,16 +52,45 @@ class MainWindow(QMainWindow):
                                         "background-color: #333; color: #eee;")
         self.layout.addWidget(self.status_label)
 
-        #self.feedback_timer = QTimer(self)
-        #self.feedback_timer.setSingleShot(True)
-        #self.feedback_timer.timeout.connect(self.reset_to_monitoring)
+    def add_threshold_slider(self):
+        # Threshold label to display the current slider value
+        self.threshold_value_label = QLabel(f"Binarization Threshold: {self.current_threshold}")
+        self.threshold_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.threshold_value_label.setStyleSheet("font-size: 16px; padding: 5px;")
+        self.layout.addWidget(self.threshold_value_label)
 
-    def display_frame(self, frame, points=()):
+        # Threshold slider
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider.setMinimum(0)
+        self.threshold_slider.setMaximum(255)  # Typical range for 8-bit grayscale
+        self.threshold_slider.setValue(self.current_threshold)
+        self.threshold_slider.setSingleStep(1)
+        self.threshold_slider.setStyleSheet("QSlider::groove:horizontal { border: 1px solid #999; height: 8px; background: #ddd; margin: 2px 0; border-radius: 4px; }" +
+                                            "QSlider::handle:horizontal { background: #555; border: 1px solid #555; width: 18px; margin: -2px 0; border-radius: 9px; }" +
+                                            "QSlider::add-page:horizontal { background: #bbb; }" +
+                                            "QSlider::sub-page:horizontal { background: #888; }")
+        
+        # Connect the slider's valueChanged signal to the update_threshold method
+        self.threshold_slider.valueChanged.connect(self.update_threshold)
+        
+        self.layout.addWidget(self.threshold_slider)
+        
+    def update_threshold(self, value):
+        """
+        Updates the current threshold value and the display label.
+        This method is connected to the QSlider's valueChanged signal.
+        """
+        self.current_threshold = value
+        self.threshold_value_label.setText(f"Binarization Threshold: {self.current_threshold}")
+        
+        
+    def display_frame(self, frame, points=(), roi=()):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
         Args:
             frame (np.ndarray): The grayscale frame to display.
             points (tuple): Tuple of tuples containing the centroid coordinates (x, y).
+            roi (tuple): Tuple containing (x, y, radius) of ROI
         """
         h, w = frame.shape  # Grayscale frames have only height and width
         bytes_per_line = w
@@ -65,7 +98,10 @@ class MainWindow(QMainWindow):
         convert_to_qt_format = QImage(frame.data, w, h, bytes_per_line, img_format)
         p = convert_to_qt_format.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio)
         pixmap = QPixmap.fromImage(p)
+        #print(roi[2]); print('------------------------')
         #print(points); print('------------------------')
+        if len(roi):
+            self.add_roi(pixmap, roi[:2], roi[2])
         for point in points:
             # Check that the point has valid coordinates
             if point[0]>0:
@@ -85,6 +121,26 @@ class MainWindow(QMainWindow):
         painter.drawEllipse(point[0] - 5, point[1] - 5, 10, 10)
         painter.end()
 
+    def add_roi(self, pixmap: QPixmap, center: tuple, radius: int,
+                color: tuple = (0,0,255)) -> QPixmap:
+        """
+        Draw a circular region of interest on a QPixmap.
+        """
+        #new_pixmap = pixmap.copy()
+        painter = QPainter(pixmap)
+        pen = QPen(QColor(*color), 3, Qt.PenStyle.SolidLine)
+        #painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        #painter.setPen(Qt.GlobalColor.blue)
+
+        rect_x = center[0] - radius
+        rect_y = center[1] - radius
+        diameter = 2 * radius
+
+        painter.drawEllipse(rect_x, rect_y, diameter, diameter)
+        painter.end()
+        #return new_pixmap
+        
     def closeEvent(self, event):
         event.accept()
 

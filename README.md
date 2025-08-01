@@ -13,6 +13,6 @@ Modules for developing a sound localization task that uses video tracking.
   * Make a copy of config_template.py and call it config.py
   * Edit your config.py file if necessary
 5. Test the installation:
-  * `python test_gui_minimal.py`
+  * `python tests/test_gui_minimal.py`
   * You should see a window showing video from your camera.
 

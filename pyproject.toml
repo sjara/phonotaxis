@@ -23,3 +23,5 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[tool.setuptools.packages.find]
+include = ["phonotaxis"]
