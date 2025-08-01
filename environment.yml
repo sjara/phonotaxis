@@ -1,0 +1,15 @@
+name: phonotaxis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - pyqt
+  - opencv
+  - python-sounddevice
+  - pyserial
+  - pip
+  - pip:
+      # Use pip to install your project itself, and any dependencies not on conda-forge
+      - -e .  # This installs your project in editable mode
+      

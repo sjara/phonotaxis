@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phonotaxis"
+version = "0.1"
+authors = [
+  { name="Santiago Jaramillo", email="sjara@uoregon.edu" },
+  { name="JoAnna O'Neill", email="jmon@uoregon.edu" }, 
+]
+description = "Sound localization task"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6",
+    "opencv-python",
+    "sounddevice",
+    "pyserial",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
