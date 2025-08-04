@@ -13,8 +13,8 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 # --- Configuration ---
 FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
 RECORDING_FPS = 20  # Desired FPS for the output video. Can be adjusted or derived from camera.
-DEFAULT_BLACK_THRESHOLD = 40  # Trigger sound when average pixel intensity is less than this
-AREA_THRESHOLD = 4000  # Minimum area of the largest contour to consider it significant
+DEFAULT_BLACK_THRESHOLD = 128  # Trigger sound when average pixel intensity is less than this
+DEFAULT_MINIMUM_AREA = 4000  # Minimum area of the largest contour to consider it significant
 
 class VideoThread(QThread):
     """
@@ -30,7 +30,7 @@ class VideoThread(QThread):
     camera_error_signal = pyqtSignal(str)
     frame_processed = pyqtSignal(float, np.ndarray, tuple) # Emits frame and object centroid (x,y)
 
-    def __init__(self, camera_index=0, save_to=None, mode='grayscale', tracking=False):
+    def __init__(self, camera_index=0, save_to=None, mode='grayscale', tracking=False, debug=False):
         """
         Args:
             camera_index (int): Index of the camera to use.
@@ -38,6 +38,7 @@ class VideoThread(QThread):
             mode (str): Type of image emitted: ['grayscale', 'binary']
                         Note that this does not affect the saved video.
             tracking (bool): Whether to track the largest dark object in the video.
+            debug (bool): If True, prints debug information to console.
         """
         super().__init__()
         self.camera_index = camera_index
@@ -47,13 +48,24 @@ class VideoThread(QThread):
         self.mode = mode
         self.tracking = tracking
         self.save_to = save_to
+        self.threshold = DEFAULT_BLACK_THRESHOLD  # Default threshold for detecting dark objects
+        self.minarea = DEFAULT_MINIMUM_AREA  # Default minimum area of object to track
+        self.debug = debug
         self.initialize_camera()
 
     def set_threshold(self, threshold):
         self.threshold = threshold
         
-    def set_tracking_params(self, threshold=DEFAULT_BLACK_THRESHOLD,
-                            min_area=AREA_THRESHOLD):
+    def set_minarea(self, minarea):
+        self.minarea = minarea
+
+    def set_mode(self, mode):
+        if mode not in ['grayscale', 'binary']:
+            raise ValueError("Mode must be 'grayscale' or 'binary'.")
+        self.mode = mode
+        
+    def OLD_set_tracking_params(self, threshold=DEFAULT_BLACK_THRESHOLD,
+                            min_area=DEFAULT_MINIMUM_AREA):
         """
         Args:
             threshold (int): Threshold for detecting dark objects in grayscale.
@@ -159,22 +171,19 @@ class VideoThread(QThread):
                 if area > largest_area:
                     largest_area = area
                     largest_contour = cnt
-            if largest_contour is not None and largest_area > AREA_THRESHOLD:
+            if largest_contour is not None and largest_area > self.minarea:
                 mom = cv2.moments(largest_contour)
                 if mom["m00"] != 0:
                     cX = int(mom["m10"] / mom["m00"])
                     cY = int(mom["m01"] / mom["m00"])
                     centroid = (cX, cY)
-        # Emit the processed frame and the centroid coordinates
-        # if self.mode == 'grayscale':
-        #     self.frame_processed.emit(frame, centroid)
-        # elif self.mode == 'binary':
-        #     self.frame_processed.emit(cv2.bitwise_not(binary_frame), centroid)
         points = (centroid,)  # A tuple of points of interest
         if self.mode == 'grayscale':
             processed_frame = frame
         elif self.mode == 'binary':
             processed_frame = cv2.bitwise_not(binary_frame)
+        if self.debug:
+            print(f"Centroid: {centroid} \t Largest area: {largest_area}")
         return (processed_frame, points)
         
     def stop(self):

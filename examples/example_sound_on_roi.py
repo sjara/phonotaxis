@@ -31,6 +31,9 @@ class Task(gui.MainWindow):
 
     def __init__(self):
         super().__init__()
+        self.status_label = gui.StatusWidget()
+        self.layout.addWidget(self.status_label)
+        
         self.current_state = STATE_MONITORING
         self.correct_channel = None
 
@@ -45,15 +48,17 @@ class Task(gui.MainWindow):
         """Starts the video capture thread and connects its signals."""
         self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, SAVE_VIDEO_TO,
                                                     mode=DISPLAY_MODE, tracking=True)
-        self.video_thread.set_tracking_params(threshold=BLACK_THRESHOLD,
-                                              min_area=MIN_AREA)
+        self.video_thread.set_threshold(BLACK_THRESHOLD)
+        self.video_thread.set_minarea(MIN_AREA)
+        #self.video_thread.set_tracking_params(threshold=BLACK_THRESHOLD,
+        #                                      min_area=MIN_AREA)
         self.video_thread.frame_processed.connect(self.update_image)
         self.video_thread.start()
 
     def update_image(self, timestamp, frame, points):
         """Updates the video display label with new frames and points."""
         self.check_roi(points[0])  # Send first point: centroid
-        self.display_frame(frame, points, ROI)
+        self.video_widget.display_frame(frame, points, ROI)
 
     def check_roi(self, point):
         """
@@ -71,7 +76,7 @@ class Task(gui.MainWindow):
     def reset_to_monitoring(self):
         """Resets the application state back to video monitoring."""
         self.current_state = STATE_MONITORING
-        self.status_label.setText("Monitoring video feed...")
+        self.status_label.reset("Monitoring video feed...")
         
     def handle_object_in_roi(self):
         """

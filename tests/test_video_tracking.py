@@ -1,37 +1,58 @@
 """
-Test video tracking within the GUI.
+Use a slider to set the threshold for binarizing video.
 """
 
-from phonotaxis import gui
+import sys
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QMessageBox, QSlider
+from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
 from phonotaxis import videomodule
+from phonotaxis import gui
 from phonotaxis import config
 
-# --- Configuration ---
-SAVE_VIDEO_TO = None #'/tmp/output.avi' #None
-DISPLAY_MODE = 'binary'  # It can be 'grayscale' or 'binary'
+CAMERA_INDEX = config.CAMERA_INDEX
+SAVE_VIDEO_TO = None
 
-# -- Settings for object tracking --
-BLACK_THRESHOLD = 40  # Theshold for binarizing the video frame
-MIN_AREA = 4000  # Minimum area of the object to be considered valid for tracking
-
-class Task(gui.MainWindow):
+class TestVideoThreshold(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, SAVE_VIDEO_TO,
-                                                    mode=DISPLAY_MODE, tracking=True)
-        self.video_thread.set_tracking_params(threshold=BLACK_THRESHOLD,
-                                              min_area=MIN_AREA)
-        self.video_thread.frame_processed.connect(self.update_image)
-        self.video_thread.start()
+        self.setWindowTitle("Video threshold test")
+        self.setGeometry(800, 400, 800, 600)
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
 
-    def update_image(self, timestamp, frame, points):
-        self.display_frame(frame, points)
+        self.video_widget = gui.VideoWidget()
+        #self.threshold_slider = gui.ThresholdSlider()
+        self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold")
+        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Minimum area")
+
+        self.layout.addWidget(self.video_widget)
+        self.layout.addWidget(self.threshold_slider)
+        self.layout.addWidget(self.minarea_slider)
+
+        self.threshold_slider.value_changed.connect(self.update_threshold)
+        self.minarea_slider.value_changed.connect(self.update_minarea)
         
-    def closeEvent(self, event):
-        """Handles the close event to stop the video thread."""
-        self.video_thread.stop()
-        super().closeEvent(event)
+        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, SAVE_VIDEO_TO,
+                                                    mode='binary', tracking=True, debug=True)
+        self.video_thread.frame_processed.connect(self.update_image)
+        self.update_threshold(self.threshold_slider.value)
+        self.update_minarea(self.minarea_slider.value)
+        self.video_thread.start()
+        
+    def update_image(self, timestamp, frame, points):
+        self.video_widget.display_frame(frame, points)
+        
+    def update_threshold(self, value):
+        self.video_thread.set_threshold(value)
 
-
+    def update_minarea(self, value):
+        self.video_thread.set_minarea(value)
+        
 if __name__ == "__main__":
-    (app,paradigm) = gui.create_app(Task)
+    app = QApplication(sys.argv)
+    window = TestVideoThreshold()
+    window.show()
+    sys.exit(app.exec())

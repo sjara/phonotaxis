@@ -36,54 +36,44 @@ class MainWindow(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
+        self.video_widget = VideoWidget()
+        self.layout.addWidget(self.video_widget)
 
-        self.video_label = QLabel("Waiting for camera feed...")
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("background-color: #222; color: #fff;" +
-                                       "border-radius: 10px;")
-        self.layout.addWidget(self.video_label)
+    def closeEvent(self, event):
+        event.accept()
 
-        #self.add_threshold_slider()
-        
+class oldStatusWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
         self.status_label = QLabel("Monitoring video feed...")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet("font-size: 20px; font-weight: bold;" +
                                         "padding: 10px; border-radius: 8px;" +
                                         "background-color: #333; color: #eee;")
         self.layout.addWidget(self.status_label)
+  
+class StatusWidget(QLabel):
+    def __init__(self):
+        super().__init__("Monitoring video feed...")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.reset()
+    def reset(self, label="Monitoring video feed..."):
+        self.setStyleSheet("font-size: 20px; font-weight: bold;" +
+                           "padding: 10px; border-radius: 8px;" +
+                           "background-color: #333; color: #eee;")
+  
+class VideoWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        #self.setGeometry(100, 100, 800, 600)
+        self.layout = QVBoxLayout(self)
+        self.video_label = QLabel("Waiting for camera feed...")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setStyleSheet("background-color: #222; color: #fff;" +
+                                       "border-radius: 10px;")
+        self.layout.addWidget(self.video_label)
 
-    def add_threshold_slider(self):
-        # Threshold label to display the current slider value
-        self.threshold_value_label = QLabel(f"Binarization Threshold: {self.current_threshold}")
-        self.threshold_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.threshold_value_label.setStyleSheet("font-size: 16px; padding: 5px;")
-        self.layout.addWidget(self.threshold_value_label)
-
-        # Threshold slider
-        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
-        self.threshold_slider.setMinimum(0)
-        self.threshold_slider.setMaximum(255)  # Typical range for 8-bit grayscale
-        self.threshold_slider.setValue(self.current_threshold)
-        self.threshold_slider.setSingleStep(1)
-        self.threshold_slider.setStyleSheet("QSlider::groove:horizontal { border: 1px solid #999; height: 8px; background: #ddd; margin: 2px 0; border-radius: 4px; }" +
-                                            "QSlider::handle:horizontal { background: #555; border: 1px solid #555; width: 18px; margin: -2px 0; border-radius: 9px; }" +
-                                            "QSlider::add-page:horizontal { background: #bbb; }" +
-                                            "QSlider::sub-page:horizontal { background: #888; }")
-        
-        # Connect the slider's valueChanged signal to the update_threshold method
-        self.threshold_slider.valueChanged.connect(self.update_threshold)
-        
-        self.layout.addWidget(self.threshold_slider)
-        
-    def update_threshold(self, value):
-        """
-        Updates the current threshold value and the display label.
-        This method is connected to the QSlider's valueChanged signal.
-        """
-        self.current_threshold = value
-        self.threshold_value_label.setText(f"Binarization Threshold: {self.current_threshold}")
-        
-        
     def display_frame(self, frame, points=(), roi=()):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
@@ -140,11 +130,53 @@ class MainWindow(QMainWindow):
         painter.drawEllipse(rect_x, rect_y, diameter, diameter)
         painter.end()
         #return new_pixmap
+
+
+class SliderWidget(QWidget):
+    """
+    A widget that contains a slider for adjusting a video parameter.
+    """
+    value_changed = pyqtSignal(int)
+    
+    def __init__(self, parent=None, maxvalue=128, label="Value"):
+        super().__init__(parent)
+        self.maxvalue = maxvalue
+        self.value = maxvalue//2
+        self.label = label
         
-    def closeEvent(self, event):
-        event.accept()
-
-
+        self.layout = QVBoxLayout(self)
+        # Label to display the current slider value
+        self.value_label = QLabel(f"{self.label}: {self.value}")
+        self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.value_label.setStyleSheet("font-size: 16px; padding: 5px;")
+        self.layout.addWidget(self.value_label)
+        # Slider to adjust the value
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(self.maxvalue)
+        self.slider.setValue(self.value)
+        self.slider.setSingleStep(self.maxvalue//128)
+        self.slider.setStyleSheet("QSlider::groove:horizontal " +
+                                            "{border: 1px solid #999; height: 8px; background: #ddd; "
+                                            " margin: 2px 0; border-radius: 4px; }" +
+                                            "QSlider::handle:horizontal " +
+                                            "{background: #555; border: 1px solid #555; width: 18px; "
+                                            " margin: -2px 0; border-radius: 9px; }" +
+                                            "QSlider::add-page:horizontal { background: #bbb; }" +
+                                            "QSlider::sub-page:horizontal { background: #888; }")
+        self.slider.valueChanged.connect(self.update_value)
+        self.layout.addWidget(self.slider)
+        
+    def update_value(self, value):
+        """
+        Updates the current value and the display label.
+        This method is connected to the QSlider's valueChanged signal.
+        """
+        self.value = value
+        self.value_label.setText(f"{self.label}: {self.value}")
+        self.value_changed.emit(self.value)
+    
+        
 def create_app(task_class):
 
     app = QApplication(sys.argv)
