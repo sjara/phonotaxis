@@ -17,6 +17,7 @@ dependencies = [
     "opencv-python",
     "sounddevice",
     "pyserial",
+    "pyfirmata2"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

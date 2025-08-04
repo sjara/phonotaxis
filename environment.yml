@@ -5,11 +5,10 @@ channels:
 dependencies:
   - python>=3.9
   - pyqt>=6
-  - opencv
   - python-sounddevice
-  - pyserial
   - pip
   - pip:
       # Use pip to install your project itself, and any dependencies not on conda-forge
       - -e .  # This installs your project in editable mode
-      
+
+# You may need to install opencv-python from pip by yourself
