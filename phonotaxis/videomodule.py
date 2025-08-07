@@ -244,3 +244,22 @@ class VideoThreadBlackDetect(VideoThread):
             self.black_screen_detected_signal.emit()
         return (frame, ())  # Return the frame and an empty tuple for points of interest
 
+
+def count_video_frames(video_path):
+    """
+    Manually count frames by reading through the entire video.
+    This is slower but works with any video format.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return 0
+    
+    frame_count = 0
+    while True:
+        ret, _ = cap.read()
+        if not ret:
+            break
+        frame_count += 1
+    
+    cap.release()
+    return frame_count
