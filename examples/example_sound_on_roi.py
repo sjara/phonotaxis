@@ -11,7 +11,7 @@ from phonotaxis import soundmodule
 from phonotaxis import config
 
 # --- Configuration ---
-SAVE_VIDEO_TO = None #'/tmp/output.avi' #None
+#SAVE_VIDEO_TO = None #'/tmp/output.avi' #None
 DISPLAY_MODE = 'binary'  # It can be 'grayscale' or 'binary'
 FEEDBACK_DURATION = 1000  # In milliseconds
 
@@ -31,9 +31,14 @@ class Task(gui.MainWindow):
 
     def __init__(self):
         super().__init__()
+        # -- Additional GUI --
+        self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold")
+        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Minimum area")
         self.status_label = gui.StatusWidget()
+        self.layout.addWidget(self.threshold_slider)
+        self.layout.addWidget(self.minarea_slider)
         self.layout.addWidget(self.status_label)
-        
+
         self.current_state = STATE_MONITORING
         self.correct_channel = None
 
@@ -44,10 +49,20 @@ class Task(gui.MainWindow):
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self.reset_to_monitoring)
 
+        # -- Connect signals from GUI --
+        self.threshold_slider.value_changed.connect(self.update_threshold)
+        self.minarea_slider.value_changed.connect(self.update_minarea)
+        
+    def update_threshold(self, value):
+        self.video_thread.set_threshold(value)
+
+    def update_minarea(self, value):
+        self.video_thread.set_minarea(value)
+        
     def start_video_thread(self):
         """Starts the video capture thread and connects its signals."""
-        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, SAVE_VIDEO_TO,
-                                                    mode=DISPLAY_MODE, tracking=True)
+        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, mode=DISPLAY_MODE,
+                                                    tracking=True)
         self.video_thread.set_threshold(BLACK_THRESHOLD)
         self.video_thread.set_minarea(MIN_AREA)
         #self.video_thread.set_tracking_params(threshold=BLACK_THRESHOLD,
@@ -90,8 +105,8 @@ class Task(gui.MainWindow):
             self.play_random_sound()
             # After sound plays, transition to waiting for input
             self.current_state = STATE_WAITING_FOR_INPUT
-            self.status_label.setText("Press LEFT or RIGHT arrow key to indicate " +
-                                      "sound source.")
+            self.status_label.setText("Press '1' for LEFT or '3' for RIGHT " +
+                                      "to indicate sound source.")
 
     def play_random_sound(self):
         """Plays a sound to either the left or right speaker randomly."""
@@ -105,11 +120,16 @@ class Task(gui.MainWindow):
 
     def keyPressEvent(self, event):
         """Handles key press events for user input."""
+        #key_left_key = Qt.Key.Key_Left
+        #key_right_key = Qt.Key.Key_Right
+        key_left = Qt.Key.Key_1  # '<'
+        key_right = Qt.Key.Key_3  # '>'
+        
         if self.current_state == STATE_WAITING_FOR_INPUT:
             user_channel = None
-            if event.key() == Qt.Key.Key_Left:
+            if event.key() == key_left:
                 user_channel = 'left'
-            elif event.key() == Qt.Key.Key_Right:
+            elif event.key() == key_right:
                 user_channel = 'right'
 
             if user_channel:

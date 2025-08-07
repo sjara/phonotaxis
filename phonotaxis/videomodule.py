@@ -11,8 +11,9 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 # --- Configuration ---
-FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
-RECORDING_FPS = 20  # Desired FPS for the output video. Can be adjusted or derived from camera.
+#FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
+FOURCC_CODEC = cv2.VideoWriter_fourcc(*'MP4V')  # Codec for AVI files. 'MP4V' for .mp4
+RECORDING_FPS = 60  # Desired FPS for the output video. Can be adjusted or derived from camera.
 DEFAULT_BLACK_THRESHOLD = 128  # Trigger sound when average pixel intensity is less than this
 DEFAULT_MINIMUM_AREA = 4000  # Minimum area of the largest contour to consider it significant
 
@@ -30,11 +31,10 @@ class VideoThread(QThread):
     camera_error_signal = pyqtSignal(str)
     frame_processed = pyqtSignal(float, np.ndarray, tuple) # Emits frame and object centroid (x,y)
 
-    def __init__(self, camera_index=0, save_to=None, mode='grayscale', tracking=False, debug=False):
+    def __init__(self, camera_index=0, mode='grayscale', tracking=False, debug=False):
         """
         Args:
             camera_index (int): Index of the camera to use.
-            save_to (str): Path to save the video output. If None, no saving occurs.
             mode (str): Type of image emitted: ['grayscale', 'binary']
                         Note that this does not affect the saved video.
             tracking (bool): Whether to track the largest dark object in the video.
@@ -45,13 +45,19 @@ class VideoThread(QThread):
         self._run_flag = True
         self.cap = None
         self.out = None # Initialize video writer to None
+        self.fps = None
         self.mode = mode
         self.tracking = tracking
-        self.save_to = save_to
+        self.recording_status = False  # Whether video recording is active
+        self.filepath = None  # Path to save the video output, if any
         self.threshold = DEFAULT_BLACK_THRESHOLD  # Default threshold for detecting dark objects
         self.minarea = DEFAULT_MINIMUM_AREA  # Default minimum area of object to track
         self.debug = debug
         self.initialize_camera()
+        #if self.save_to is not None:
+        #    if not os.path.exists(os.path.dirname(self.save_to)):
+        #        os.makedirs(os.path.dirname(self.save_to))
+        #self.initialize_video_writer()
 
     def set_threshold(self, threshold):
         self.threshold = threshold
@@ -63,17 +69,7 @@ class VideoThread(QThread):
         if mode not in ['grayscale', 'binary']:
             raise ValueError("Mode must be 'grayscale' or 'binary'.")
         self.mode = mode
-        
-    def OLD_set_tracking_params(self, threshold=DEFAULT_BLACK_THRESHOLD,
-                            min_area=DEFAULT_MINIMUM_AREA):
-        """
-        Args:
-            threshold (int): Threshold for detecting dark objects in grayscale.
-            min_area (int): Minimum area of the largest contour to consider it significant.
-        """
-        self.threshold = threshold
-        self.min_area = min_area
-        
+                
     def initialize_camera(self):
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
@@ -83,23 +79,51 @@ class VideoThread(QThread):
             self._run_flag = False
             return
 
+    def start_recording(self, filepath=None):
+        """
+        Starts the video recording. This should be called after setting the output file.
+        """
+        if filepath is not None:
+            self.filepath = filepath
+            self.initialize_video_writer(self.filepath)
+            self.recording_status = True
+            print(f"Video recording started: {self.filepath}")
+        else:
+            print("Video recording not started: No output file set or writer not initialized.")
+        
+    def stop_recording(self):
+        """
+        Stops the video recording and releases the video writer.
+        """
+        self.recording_status = False
+        print("Video recording stopped.")
+            
+    def initialize_video_writer(self, filepath):
+        # Create the directory if it does not exist
+        self.filepath = filepath
+        dir_path = os.path.dirname(self.filepath)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+
         # Get video properties for saving
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         # Use a fixed FPS for recording, or try self.cap.get(cv2.CAP_PROP_FPS) if reliable
         # If camera FPS is very low or variable, a fixed RECORDING_FPS is better.
-        fps = RECORDING_FPS
+        #fps = RECORDING_FPS
+        # fps = self.cap.get(cv2.CAP_PROP_FPS)
+        # if fps <= 0:  # If FPS is not set or invalid, use a default value
+        #     fps = RECORDING_FPS
 
         # Initialize VideoWriter
         try:
-            if self.save_to is not None:
-                self.out = cv2.VideoWriter(self.save_to, FOURCC_CODEC, fps,
-                                           (frame_width, frame_height))
-                if not self.out.isOpened():
-                    raise IOError(f"Could not open video writer for {self.save_to}." +
-                                  "Check codec or file path.")
-                print(f"Recording video to {self.save_to} at {fps} FPS, " +
-                      f"resolution {frame_width}x{frame_height}")
+            self.out = cv2.VideoWriter(self.filepath, FOURCC_CODEC, self.fps,
+                                        (frame_width, frame_height))
+            if not self.out.isOpened():
+                raise IOError(f"Could not open video writer for {self.filepath}." +
+                                "Check codec or file path.")
+            print(f"Recording video to {self.filepath} at {self.fps} FPS, " +
+                    f"resolution {frame_width}x{frame_height}")
         except Exception as e:
             self.camera_error_signal.emit(f"Error initializing video writer: {e}")
             self._run_flag = False
@@ -111,13 +135,24 @@ class VideoThread(QThread):
         Main loop for the thread. Captures video frames, processes them,
         and emits signals for display.
         """
+
+        # Calculate proper frame interval based on desired FPS
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0:  # If FPS is not set or invalid, use a default value
+            self.fps = RECORDING_FPS
+            print('Warning: The camera did not return a valid FPS. ')
+            print('The FPS of the video file will not be accurate. Using default FPS:', self.fps)
+        else:
+            print('Camera reported FPS:', self.fps)
+        frame_interval = 1.0 / self.fps  # seconds between frames
+        last_timestamp = 0
+
         while self._run_flag:
             ret, frame = self.cap.read()
             timestamp = time.time() # A float in seconds.
 
             if ret:
-                # Write the frame to the output video file
-                if self.save_to is not None:
+                if self.recording_status:
                     self.out.write(frame)
 
                 # Convert frame to grayscale for black detection
@@ -135,7 +170,7 @@ class VideoThread(QThread):
                                               "The camera might have been disconnected.")
                 self._run_flag = False
 
-            QThread.msleep(30)  # Small delay to reduce CPU usage
+            QThread.msleep(1)  # Small delay to reduce CPU usage
 
         # Release the camera and video writer when the thread stops
         if self.cap:
@@ -151,8 +186,6 @@ class VideoThread(QThread):
         """
         if not self.tracking:
             return (frame, ())
-        #self.frame_processed.emit(frame, ())
-        #    return
         
         max_value = 255  # Assumes 8-bit grayscale images
         inverted_frame = cv2.bitwise_not(frame)
@@ -211,71 +244,3 @@ class VideoThreadBlackDetect(VideoThread):
             self.black_screen_detected_signal.emit()
         return (frame, ())  # Return the frame and an empty tuple for points of interest
 
-
-#DEFAULT_BLACK_THRESHOLD = 60  # Trigger sound when average pixel intensity is less than this
-#AREA_THRESHOLD = 4000
-class OLD_VideoThreadTracking(VideoThread):
-    """
-    A specialized video thread for tracking the darkest object.
-    Inherits from VideoThread to reuse camera handling and video processing.
-    """
-    #frame_processed = pyqtSignal(tuple) # Emits the centroid (x,y)
-    frame_processed = pyqtSignal(np.ndarray, tuple) # Emits the frame and centroid (x,y)
-    
-    def __init__(self, camera_index=0, save_to=None, threshold=DEFAULT_BLACK_THRESHOLD,
-                 mode='grayscale'):
-        """
-        Args:
-            camera_index (int): Index of the camera to use.
-            save_to (str): Path to save the video output. If None, no saving occurs.
-            threshold (int): Threshold for detecting dark objects in grayscale.
-            mode (str): Type of image emitted: ['grayscale', 'binary']
-                        Note that this does not affect the saved video.
-        """
-        super().__init__(camera_index, save_to)
-        self.threshold = threshold
-        self.mode = mode
-
-    def process_frame(self, frame):
-        max_value = 255
-        inverted_frame = cv2.bitwise_not(frame)
-        #inverted_frame = cv2.blur(inverted_frame, (5, 5))
-        ret, binary_frame = cv2.threshold(inverted_frame, max_value-self.threshold,
-                                          max_value, cv2.THRESH_BINARY) # + cv2.THRESH_OTSU)
-        contours, hierarchy = cv2.findContours(binary_frame, cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_SIMPLE)
-        centroid = ()
-        largest_area = 0
-        largest_contour = None
-
-        if contours:
-            #print('----------------------------------')
-            for indc, cnt in enumerate(contours):
-                area = cv2.contourArea(cnt)
-                #cv2.drawContours(frame, [cnt], -1, (255, 255, 255), 2) # White contour
-                #print(f"{indc}: {area}")
-                if area > largest_area:
-                    largest_area = area
-                    largest_contour = cnt
-            if largest_contour is not None and largest_area > AREA_THRESHOLD:
-                mom = cv2.moments(largest_contour)
-                if mom["m00"] != 0:
-                    cX = int(mom["m10"] / mom["m00"])
-                    cY = int(mom["m01"] / mom["m00"])
-                    centroid = (cX, cY)
-
-                    # Optional: Draw the contour and centroid
-                    #if self.mode == 'grayscale':
-                    #    cv2.drawContours(frame, [largest_contour], -1, (255, 255, 255), 2)
-                    #cv2.drawContours(frame, [largest_contour], -1, (255, 255, 255), 4)
-                    #cv2.circle(frame, centroid, 5, (255, 255, 255), -1) # Red centroid
-                    #cv2.putText(frame, f"({cX},{cY}: {largest_area})",
-                    #            (cX + 10, cY + 10),
-                    #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                #print(f"*{indc}* : {largest_area}")
-        # Emit the processed frame and the centroid coordinates
-        if self.mode == 'grayscale':
-            self.frame_processed.emit(frame, centroid)
-        elif self.mode == 'binary':
-            self.frame_processed.emit(cv2.bitwise_not(binary_frame), centroid)
-        

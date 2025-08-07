@@ -1,5 +1,5 @@
 # phonotaxis
-Modules for developing a sound localization task that uses video tracking.
+Modules for developing sound localization tasks that use video tracking.
 
 ## INSTALLATION
 1. Clone the repo:
@@ -16,3 +16,7 @@ Modules for developing a sound localization task that uses video tracking.
   * `python tests/test_gui_minimal.py`
   * You should see a window showing video from your camera.
 
+## CONTENTS
+* `phonotaxis`: core modules.
+* `tests`: test scripts for each capability (video, arduino, etc).
+* `examples`: example scripts for creating full tasks (which we call paradigms).

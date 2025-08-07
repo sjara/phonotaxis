@@ -26,7 +26,7 @@ class TestVideoThreshold(QMainWindow):
         self.video_widget = gui.VideoWidget()
         #self.threshold_slider = gui.ThresholdSlider()
         self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold")
-        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Minimum area")
+        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Min area")
 
         self.layout.addWidget(self.video_widget)
         self.layout.addWidget(self.threshold_slider)
@@ -35,8 +35,7 @@ class TestVideoThreshold(QMainWindow):
         self.threshold_slider.value_changed.connect(self.update_threshold)
         self.minarea_slider.value_changed.connect(self.update_minarea)
         
-        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, SAVE_VIDEO_TO,
-                                                    mode='binary', tracking=True, debug=True)
+        self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, mode='binary', tracking=True, debug=True)
         self.video_thread.frame_processed.connect(self.update_image)
         self.update_threshold(self.threshold_slider.value)
         self.update_minarea(self.minarea_slider.value)
