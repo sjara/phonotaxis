@@ -16,8 +16,8 @@ from phonotaxis.statematrix import StateMatrix
 
 
 # Create a simple state matrix
-sm = StateMatrix(inputs={'C':0, 'L':1, 'R':2},
-                outputs={'centerLED':0, 'leftLED':1, 'rightLED':2})
+sm = StateMatrix(inputs=['C', 'L', 'R'],
+                outputs=['centerLED', 'leftLED', 'rightLED'])
 
 # Add states
 sm.add_state(name='wait_for_cpoke', statetimer=2,
