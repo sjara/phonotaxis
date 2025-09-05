@@ -14,9 +14,13 @@ PORT = config.ARDUINO_PORT #Arduino.AUTODETECT
 
 def on_analog_read(value):
     print(f"Analog value: {value} \t Press Ctrl+C to stop.")
+    #time.sleep(0.1)  # Simulate some processing delay
+    #pass
 
 print(f'Connecting to Arduino on port: {PORT} ...')
 board = Arduino(PORT)
+
+#board.samplingOn(1) # See https://github.com/berndporr/pyFirmata2
 
 analog_pin = board.get_pin('a:0:i')
 analog_pin.enable_reporting()

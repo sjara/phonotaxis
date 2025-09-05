@@ -52,7 +52,7 @@ class ArduinoTestWindow(QMainWindow):
         self.plot_timer = QTimer()
         self.plot_timer.timeout.connect(self.update_plots)
         #self.plot_timer.setInterval(50)  # Update plots every 50ms (20 Hz)
-        self.plot_timer.setInterval(10)  # Update plots every 10ms (100 Hz)
+        self.plot_timer.setInterval(10)
 
         self.init_ui()
         #self.setup_arduino()
@@ -208,7 +208,7 @@ class ArduinoTestWindow(QMainWindow):
             
             # Set up axes
             ax.set_ylabel(f'A{i} Value')
-            ax.set_ylim(0, 1.0)
+            ax.set_ylim(-0.05, 1.05)
             ax.grid(True, alpha=0.3)
             #ax.legend(loc='upper right')
             
