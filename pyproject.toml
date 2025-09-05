@@ -7,9 +7,8 @@ name = "phonotaxis"
 version = "0.1"
 authors = [
   { name="Santiago Jaramillo", email="sjara@uoregon.edu" },
-  { name="JoAnna O'Neill", email="jmon@uoregon.edu" }, 
 ]
-description = "Sound localization task"
+description = "Modules for implementing a sound localization task"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -20,7 +19,9 @@ dependencies = [
     "pyfirmata2",
     "numpy",
     "matplotlib",
-    "pandas"
+    "pandas",
+    "h5py",
+    "bidict",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

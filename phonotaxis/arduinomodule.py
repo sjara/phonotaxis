@@ -193,8 +193,10 @@ class ArduinoThread(QThread):
             while self._run_flag:
                 if self.board:
                     self.board.iterate()
-                self.msleep(1)  # In ms. This defines the update rate.
-                
+                # Note: The actual update rate is set by board.samplingOn()
+                #       See https://github.com/berndporr/pyFirmata2
+                self.msleep(1)  # In ms
+
         except Exception as e:
             error_msg = f"Error in Arduino thread: {str(e)}"
             self.arduino_error.emit(error_msg)
