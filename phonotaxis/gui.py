@@ -10,9 +10,11 @@ import numpy as np
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout
 from PyQt6.QtWidgets import QWidget, QGridLayout, QSlider, QPushButton, QLineEdit, QGroupBox, QComboBox
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QObject
+from phonotaxis import utils
 
 BUTTON_COLORS = {'start': 'limegreen', 'stop': 'red'}
+LABEL_WIDTH = 120
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -47,12 +49,26 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         event.accept()
 
+def create_icon():
+    """Creates a simple icon using a Font Awesome-like character."""
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    font = painter.font()
+    font.setPointSize(40)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "🔊")
+    painter.end()
+    return QIcon(pixmap)
+
 class StatusWidget(QLabel):
     def __init__(self):
         super().__init__("Monitoring video feed...")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.reset()
     def reset(self, label="Monitoring video feed..."):
+        self.setText(label)
         self.setStyleSheet("font-size: 20px; font-weight: bold;" +
                            "padding: 10px; border-radius: 6px;" +
                            "background-color: #333; color: #eee;")
@@ -185,11 +201,12 @@ class Container(dict):
                 if item.get_type() == 'menu':
                     menuList = item.get_items()
                     menuDict = dict(zip(menuList, range(len(menuList))))
-                    utils.append_dict_to_HDF5(menuItemsGroup, key, menuDict)
+                    utils.append_dict_to_hdf5(menuItemsGroup, key, menuDict)
                     dset.attrs['Description'] = '{} menu items'.format(item.get_label())
             else:  # -- Store parameters without history (Session parameters) --
                 if item.get_type() == 'string':
-                    dset = sessionDataGroup.create_dataset(key, data=np.string_(item.get_value()))
+                    # dset = sessionDataGroup.create_dataset(key, data=np.str_(item.get_value()))
+                    dset = sessionDataGroup.create_dataset(key, data=item.get_value())
                 else:
                     dset = trialDataGroup.create_dataset(key, data=item.get_value())
                 dset.attrs['Description'] = item.get_label()
@@ -209,7 +226,7 @@ class ParamGroupLayout(QGridLayout):
 class GenericParam(QWidget):
     """Generic class to use as parent for parameter classes."""
     def __init__(self, labelText='', value=0, group=None,
-                 history=True, labelWidth=80, parent=None):
+                 history=True, labelWidth=LABEL_WIDTH, parent=None):
         super().__init__(parent)
         self._group = group
         self._historyEnabled = history
@@ -256,7 +273,7 @@ class GenericParam(QWidget):
 
 class StringParam(GenericParam):
     def __init__(self, labelText='', value='', group=None,
-                 labelWidth=80, enabled=True, parent=None):
+                 labelWidth=LABEL_WIDTH, enabled=True, parent=None):
         super().__init__(labelText, value, group,
                          history=False, labelWidth=labelWidth,  parent=parent)
         self._type = 'string'
@@ -282,7 +299,7 @@ class StringParam(GenericParam):
 
 class NumericParam(GenericParam):
     def __init__(self, labelText='', value=0, units='', group=None, decimals=None,
-                 history=True, labelWidth=80, enabled=True, parent=None):
+                 history=True, labelWidth=LABEL_WIDTH, enabled=True, parent=None):
         super(NumericParam, self).__init__(labelText, value, group,
                                            history, labelWidth,  parent)
         self._type = 'numeric'
@@ -320,7 +337,7 @@ class NumericParam(GenericParam):
 
 class MenuParam(GenericParam):
     def __init__(self, labelText='', menuItems=(), value=0, group=None,
-                 history=True, labelWidth=80, enabled=True, parent=None):
+                 history=True, labelWidth=LABEL_WIDTH, enabled=True, parent=None):
         super(MenuParam, self).__init__(labelText, value, group,
                                         history, labelWidth, parent)
         self._type = 'menu'
@@ -434,14 +451,20 @@ class VideoWidget(QWidget):
         # Set minimum size to match the expected video display size (640x480)
         self.video_label.setMinimumSize(640, 480)
         self.layout.addWidget(self.video_label)
+        
+        # Store first point trail (list of (x, y) tuples)
+        self.first_point_trail = []
+        self.max_trail_length = 20
 
-    def display_frame(self, frame, points=(), roi=()):
+    def display_frame(self, frame, points=(), initzone=(), mask=(), show_trail=True):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
         Args:
             frame (np.ndarray): The grayscale frame to display.
             points (tuple): Tuple of tuples containing the centroid coordinates (x, y).
-            roi (tuple): Tuple containing (x, y, radius) of ROI
+            initzone (tuple): Tuple containing (x, y, radius) of initiation zone
+            mask (tuple): Tuple containing (x, y, radius) of mask
+            show_trail (bool): If True, shows the trail of recent centroids. If False, shows only the latest point.
         """
         h, w = frame.shape  # Grayscale frames have only height and width
         bytes_per_line = w
@@ -451,12 +474,25 @@ class VideoWidget(QWidget):
         pixmap = QPixmap.fromImage(p)
         #print(roi[2]); print('------------------------')
         #print(points); print('------------------------')
-        if len(roi):
-            self.add_roi(pixmap, roi[:2], roi[2])
-        for point in points:
-            # Check that the point has valid coordinates
-            if point[0]>0:
-                self.add_point(pixmap, point)
+        if len(initzone):
+            self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=(0,0,255))
+        if len(mask):
+            self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240))
+            #self.add_rectangular_roi(pixmap, mask)
+        # Update first point trail with new first point
+        if points and points[0][0] > 0:
+            self.update_first_point_trail(points[0])
+        
+        # Draw centroids based on show_trail parameter
+        if show_trail:
+            # Draw the first point trail
+            self.add_first_point_trail(pixmap)
+        else:
+            # Draw only the latest point(s)
+            for point in points:
+                if point[0] > 0:
+                    self.add_point(pixmap, point)
+        
         self.video_label.setPixmap(pixmap)
 
     def add_point(self, pixmap, point):
@@ -467,12 +503,69 @@ class VideoWidget(QWidget):
             point (tuple): The coordinates of the centroid (x, y).
         """
         painter = QPainter(pixmap)
-        painter.setPen(Qt.GlobalColor.red)
+        painter.setPen(Qt.PenStyle.NoPen)  # No border
         painter.setBrush(Qt.GlobalColor.red)
         painter.drawEllipse(point[0] - 5, point[1] - 5, 10, 10)
         painter.end()
 
-    def add_roi(self, pixmap: QPixmap, center: tuple, radius: int,
+    def update_first_point_trail(self, point):
+        """
+        Updates the first point trail with a new point.
+        Args:
+            point (tuple): The coordinates of the first point (x, y).
+        """
+        self.first_point_trail.append(point)
+        # Keep only the last max_trail_length points
+        if len(self.first_point_trail) > self.max_trail_length:
+            self.first_point_trail.pop(0)
+
+    def add_first_point_trail(self, pixmap):
+        """
+        Draws the first point trail with decreasing transparency.
+        Args:
+            pixmap (QPixmap): The pixmap to draw on.
+        """
+        if not self.first_point_trail:
+            return
+            
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw trail points with decreasing alpha (oldest to newest)
+        for ind, point in enumerate(self.first_point_trail):
+            # Calculate alpha based on position in trail (0 = oldest, -1 = newest)
+            alpha = int(255 * (ind + 1) / len(self.first_point_trail))
+            
+            # Create color with alpha
+            color = QColor(255, 0, 0, alpha)  # Red with varying alpha
+            painter.setPen(Qt.PenStyle.NoPen)  # No border
+            painter.setBrush(color)
+            
+            # Draw smaller circles for older points, larger for newer ones
+            radius = 3 + (ind * 2) // len(self.first_point_trail)
+            painter.drawEllipse(point[0] - radius, point[1] - radius, 
+                              2 * radius, 2 * radius)
+        
+        painter.end()
+
+    def clear_first_point_trail(self):
+        """
+        Clears the first point trail.
+        """
+        self.first_point_trail.clear()
+
+    def set_trail_length(self, length):
+        """
+        Sets the maximum length of the first point trail.
+        Args:
+            length (int): Maximum number of points to keep in the trail.
+        """
+        self.max_trail_length = max(1, length)
+        # Trim existing trail if necessary
+        while len(self.first_point_trail) > self.max_trail_length:
+            self.first_point_trail.pop(0)
+
+    def add_circular_roi(self, pixmap: QPixmap, center: tuple, radius: int,
                 color: tuple = (0,0,255)) -> QPixmap:
         """
         Draw a circular region of interest on a QPixmap.
@@ -492,6 +585,28 @@ class VideoWidget(QWidget):
         painter.end()
         #return new_pixmap
 
+    def add_rectangular_roi(self, pixmap: QPixmap, roi: tuple,
+                           color: tuple = (255,0,0)) -> QPixmap:
+        """
+        Draw a rectangular region of interest on a QPixmap.
+        
+        Args:
+            pixmap (QPixmap): The pixmap to draw on
+            roi (tuple): (x1, y1, x2, y2) coordinates of the rectangle
+            color (tuple): RGB color for the rectangle border (default: red)
+        """
+        x1, y1, x2, y2 = roi
+        painter = QPainter(pixmap)
+        pen = QPen(QColor(*color), 2, Qt.PenStyle.SolidLine)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+
+        # Draw rectangle from top-left to bottom-right
+        width = x2 - x1
+        height = y2 - y1
+        painter.drawRect(x1, y1, width, height)
+        painter.end()
+
 
 class CustomSlider(QSlider):
     """Custom QSlider that ignores arrow key events."""
@@ -504,7 +619,7 @@ class CustomSlider(QSlider):
             # For other keys, use default slider behavior
             super().keyPressEvent(event)
 
-SLIDER_STYLESHEET = """
+OLD_SLIDER_STYLESHEET = """
     QSlider::groove:horizontal {
         border: 1px solid #999;
         height: 8px;
@@ -518,6 +633,18 @@ SLIDER_STYLESHEET = """
         width: 18px;
         margin: -2px 0;
         border-radius: 9px;
+    }
+    QSlider::add-page:horizontal {
+        background: #bbb;
+    }
+    QSlider::sub-page:horizontal {
+        background: #888;
+    }
+"""
+
+SLIDER_STYLESHEET = """
+    QSlider::handle:horizontal {
+        background: #555;
     }
     QSlider::add-page:horizontal {
         background: #bbb;
@@ -565,6 +692,54 @@ class SliderWidget(QWidget):
         self.value_label.setText(f"{self.label}: {self.value}")
         self.value_changed.emit(self.value)
         
+
+class Message(object):
+    """
+    Base container for a message.
+
+    It contains the timestamp, the message, and the sender.
+    """
+    def __init__(self, text):
+        self.text = text
+        self.timestamp = time.localtime()
+
+    def __str__(self):
+        '''String representation of the message'''
+        timeString = time.strftime('[%H:%M:%S] ', self.timestamp)
+        return f'{timeString}{self.text}'
+
+
+class Messenger(QObject):
+    """
+    Class for keeping a log of messages.
+
+    You use it within a QMainWindow by connecting it's signals and slots as follows:
+        self.messagebar = messenger.Messenger()
+        self.messagebar.timedMessage.connect(self.show_message)
+        self.messagebar.collect('Created window')
+    where show_message() does something like:
+        self.statusBar().showMessage(str(msg))
+    """
+    timed_message = pyqtSignal(str)
+    messages = []
+
+    def __init__(self):
+        super().__init__()
+
+    # @QtCore.Slot(str)
+    def collect(self, text):
+        new_message = Message(text)
+        Messenger.messages.append(new_message)
+        self.timed_message.emit(str(new_message))
+
+    def get_list(self):
+        return [str(x) for x in Messenger.messages]
+
+    def __str__(self):
+        return '\n'.join(self.get_list())
+
+
+
 def create_app(task_class):
 
     app = QApplication(sys.argv)
