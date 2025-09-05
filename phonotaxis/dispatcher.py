@@ -423,8 +423,8 @@ class DispatcherGUI(QtWidgets.QGroupBox):
     """
     
     # Signals for controlling the dispatcher
-    start_requested = QtCore.pyqtSignal()
-    stop_requested = QtCore.pyqtSignal()
+    start_signal = QtCore.pyqtSignal()
+    stop_signal = QtCore.pyqtSignal()
     
     def __init__(self, 
                  parent: Optional[QtWidgets.QWidget] = None,
@@ -509,8 +509,8 @@ class DispatcherGUI(QtWidgets.QGroupBox):
         # Connect to model if provided
         if self.model:
             # Connect control signals
-            self.start_requested.connect(self.model.start)
-            self.stop_requested.connect(self.model.stop)
+            self.start_signal.connect(self.model.start)
+            self.stop_signal.connect(self.model.stop)
             
             # Connect status updates
             self.model.timer_tick.connect(self._update_display)
@@ -525,12 +525,12 @@ class DispatcherGUI(QtWidgets.QGroupBox):
     def start(self) -> None:
         """Request to start the dispatcher."""
         self._set_running_appearance()
-        self.start_requested.emit()
+        self.start_signal.emit()
         
     def stop(self) -> None:
         """Request to stop the dispatcher."""
         self._set_stopped_appearance()
-        self.stop_requested.emit()
+        self.stop_signal.emit()
         
     def _set_running_appearance(self) -> None:
         """Set GUI appearance for running state."""
