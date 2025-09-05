@@ -52,6 +52,15 @@ class VideoThread(QThread):
         self.filepath = None  # Path to save the video output, if any
         self.threshold = DEFAULT_BLACK_THRESHOLD  # Default threshold for detecting dark objects
         self.minarea = DEFAULT_MINIMUM_AREA  # Default minimum area of object to track
+
+        # MASK masking parameters
+        self.mask_enabled = False  # Whether to apply MASK masking
+        self.mask_coords = None  # List of coordinates: [x1,y1,x2,y2] for rectangular or [cx,cy,radius] for circular
+
+        # Store tracking
+        self.timestamps = []
+        self.points = []  # List where each element is a list of (x,y) coordinates for one point across time
+
         self.debug = debug
         self.initialize_camera()
         #if self.save_to is not None:
@@ -65,10 +74,124 @@ class VideoThread(QThread):
     def set_minarea(self, minarea):
         self.minarea = minarea
 
+    def set_circular_mask(self, coords):
+        """
+        Set circular region of interest for masking.
+        Only pixels inside this circle will be considered for object detection.
+        
+        Args:
+            coords (list): [center_x, center_y, radius] - center coordinates and radius of the circular mask
+        """
+        if len(coords) != 3:
+            raise ValueError("Circular mask requires exactly 3 coordinates: [center_x, center_y, radius]")
+        
+        self.mask_coords = coords
+        self.mask_enabled = True
+        if self.debug:
+            center_x, center_y, radius = coords
+            print(f"Circular MASK set: center ({center_x}, {center_y}), radius {radius}")
+
+    def set_rectangular_mask(self, coords):
+        """
+        Set rectangular region of interest for masking.
+        Only pixels inside this rectangle will be considered for object detection.
+        
+        Args:
+            coords (list): [x1, y1, x2, y2] - top-left and bottom-right coordinates of the rectangle
+        """
+        if len(coords) != 4:
+            raise ValueError("Rectangular mask requires exactly 4 coordinates: [x1, y1, x2, y2]")
+        
+        self.mask_coords = coords
+        self.mask_enabled = True
+        if self.debug:
+            x1, y1, x2, y2 = coords
+            print(f"Rectangular MASK set: ({x1}, {y1}) to ({x2}, {y2})")
+
+    def set_rectangular_mask_from_center(self, center_x, center_y, width, height):
+        """
+        Set rectangular MASK from center point and dimensions.
+        
+        Args:
+            center_x (int): Center x coordinate
+            center_y (int): Center y coordinate
+            width (int): Width of the rectangle
+            height (int): Height of the rectangle
+        """
+        half_width = width // 2
+        half_height = height // 2
+        x1 = max(0, center_x - half_width)
+        y1 = max(0, center_y - half_height)
+        x2 = center_x + half_width
+        y2 = center_y + half_height
+        self.set_rectangular_mask([x1, y1, x2, y2])
+
+    def disable_mask(self):
+        """Disable MASK masking - use the full frame for object detection."""
+        self.mask_enabled = False
+        self.mask_coords = None
+        if self.debug:
+            print("MASK masking disabled")
+
+    def get_mask(self):
+        """
+        Get current MASK settings.
+        
+        Returns:
+            dict: Dictionary with MASK parameters or None if disabled
+        """
+        if not self.mask_enabled or self.mask_coords is None:
+            return None
+        
+        if len(self.mask_coords) == 3:
+            # Circular mask
+            center_x, center_y, radius = self.mask_coords
+            return {
+                'type': 'circular',
+                'coords': self.mask_coords,
+                'center_x': center_x,
+                'center_y': center_y,
+                'radius': radius,
+                'enabled': self.mask_enabled
+            }
+        elif len(self.mask_coords) == 4:
+            # Rectangular mask
+            x1, y1, x2, y2 = self.mask_coords
+            return {
+                'type': 'rectangular',
+                'coords': self.mask_coords,
+                'x1': x1,
+                'y1': y1,
+                'x2': x2,
+                'y2': y2,
+                'enabled': self.mask_enabled
+            }
+        else:
+            return None
+
     def set_mode(self, mode):
         if mode not in ['grayscale', 'binary']:
             raise ValueError("Mode must be 'grayscale' or 'binary'.")
         self.mode = mode
+
+    def store_tracking_data(self, timestamp, points):
+        """
+        Appends timestamp and points to the tracking lists, but only if video recording is active.
+        
+        Args:
+            timestamp (float): The timestamp of the frame.
+            points (tuple): The points of interest detected in the frame.
+        """
+        if self.recording_status:
+            self.timestamps.append(timestamp)
+            
+            # Ensure we have enough point lists for all detected points
+            while len(self.points) < len(points):
+                self.points.append([])
+            
+            # Append coordinates to each point's list
+            for i, point in enumerate(points):
+                self.points[i].append(point)
                 
     def initialize_camera(self):
         self.cap = cv2.VideoCapture(self.camera_index)
@@ -161,6 +284,9 @@ class VideoThread(QThread):
                 # Process video (tracking, detection, etc)
                 processed_frame, points = self.process_frame(gray_frame)
 
+                # Store tracking data if recording
+                self.store_tracking_data(timestamp, points)
+
                 # Emit signal with the new frame (e.g., to show video in GUI)
                 self.frame_processed.emit(timestamp, processed_frame, points)
                 #self.new_frame_signal.emit(gray_frame)
@@ -179,6 +305,105 @@ class VideoThread(QThread):
             self.out.release()
         print("Video thread stopped and resources released.")
 
+    def apply_circular_mask(self, frame):
+        """
+        Apply circular masking to the frame by setting pixels outside the circular mask to white (255).
+
+        Args:
+            frame (np.ndarray): Grayscale frame to mask
+            
+        Returns:
+            np.ndarray: Masked frame
+        """
+        if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 3:
+            return frame
+            
+        # Create a copy of the frame to avoid modifying the original
+        masked_frame = frame.copy()
+        height, width = frame.shape
+        
+        # Get circle parameters
+        center_x, center_y, radius = self.mask_coords
+        
+        if radius <= 0:
+            print("Warning: Invalid circular mask radius, using full frame")
+            return frame
+            
+        # Create coordinate grids
+        y_coords, x_coords = np.ogrid[:height, :width]
+        
+        # Calculate distance from center for each pixel
+        distance_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
+        
+        # Create mask: pixels outside the circle are set to white (255)
+        mask_outside_circle = distance_from_center > radius
+        masked_frame[mask_outside_circle] = 255
+        
+        return masked_frame
+
+    def apply_mask(self, frame):
+        """
+        Apply masking to the frame based on the current mask coordinates.
+        
+        Args:
+            frame (np.ndarray): Grayscale frame to mask
+            
+        Returns:
+            np.ndarray: Masked frame
+        """
+        if not self.mask_enabled or self.mask_coords is None:
+            return frame
+            
+        if len(self.mask_coords) == 3:
+            # Circular mask: [center_x, center_y, radius]
+            return self.apply_circular_mask(frame)
+        elif len(self.mask_coords) == 4:
+            # Rectangular mask: [x1, y1, x2, y2]
+            return self.apply_rectangular_mask(frame)
+        else:
+            print(f"Warning: Invalid mask coordinates length ({len(self.mask_coords)}), using full frame")
+            return frame
+
+    def apply_rectangular_mask(self, frame):
+        """
+        Apply rectangular masking to the frame by setting pixels outside the mask to white (255).
+
+        Args:
+            frame (np.ndarray): Grayscale frame to mask
+            
+        Returns:
+            np.ndarray: Masked frame
+        """
+        if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 4:
+            return frame
+            
+        # Create a copy of the frame to avoid modifying the original
+        masked_frame = frame.copy()
+        height, width = frame.shape
+        
+        # Get rectangle parameters
+        x1, y1, x2, y2 = self.mask_coords
+        
+        # Set default bounds if not specified and validate
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(width, x2) if x2 is not None else width
+        y2 = min(height, y2) if y2 is not None else height
+        
+        # Ensure coordinates are valid
+        if x1 >= x2 or y1 >= y2:
+            print("Warning: Invalid MASK coordinates, using full frame")
+            return frame
+            
+        # Create mask: 0 inside MASK, 255 outside MASK
+        mask = np.ones_like(frame) * 255
+        mask[y1:y2, x1:x2] = 0
+        
+        # Set pixels outside MASK to white (255)
+        masked_frame[mask == 255] = 255
+        
+        return masked_frame
+
     def process_frame(self, frame):
         """
         Here is where you will perform tracking and detection of elements in video.
@@ -187,8 +412,11 @@ class VideoThread(QThread):
         if not self.tracking:
             return (frame, ())
         
+        # Apply MASK masking if enabled
+        masked_frame = self.apply_mask(frame)
+        
         max_value = 255  # Assumes 8-bit grayscale images
-        inverted_frame = cv2.bitwise_not(frame)
+        inverted_frame = cv2.bitwise_not(masked_frame)
         #inverted_frame = cv2.blur(inverted_frame, (5, 5))  # Optional: blur to reduce noise
         ret, binary_frame = cv2.threshold(inverted_frame, max_value-self.threshold,
                                           max_value, cv2.THRESH_BINARY) # + cv2.THRESH_OTSU)
@@ -212,6 +440,7 @@ class VideoThread(QThread):
                     centroid = (cX, cY)
         points = (centroid,)  # A tuple of points of interest
         if self.mode == 'grayscale':
+            # Return the original frame for display, but use masked frame for processing
             processed_frame = frame
         elif self.mode == 'binary':
             processed_frame = cv2.bitwise_not(binary_frame)
