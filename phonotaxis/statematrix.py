@@ -26,10 +26,9 @@ Key attributes:
 - events_dict: Dictionary mapping event names to their column indices in the matrix
 """
 
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 import numpy as np
 from bidict import bidict
-
 from phonotaxis import utils
 
 # Use float('inf') for states that should never timeout
@@ -51,9 +50,9 @@ class StateMatrix():
     next column for the state timer.
 
     State Structure:
-        - START state: Always state 0, created automatically during initialization
-        - END state: Always the last state, created automatically when matrices are requested
-        - User-defined states: Created between START and END states
+        - END state: Always state 0, created automatically during initialization
+        - START state: Always state 1, created automatically during initialization  
+        - User-defined states: Created after START and END states
 
     Main Methods:
         get_matrix(): Returns state transition matrix as NumPy array (adds END state)
@@ -61,12 +60,12 @@ class StateMatrix():
         get_state_timers(): Returns timer durations as NumPy array
 
     Attributes:
-        inputs_dict: Dictionary mapping input names to their indices
-        outputs_dict: Dictionary mapping output names to their indices  
+        inputs_dict: Dictionary mapping input names to sequential indices (auto-generated)
+        outputs_dict: Dictionary mapping output names to sequential indices (auto-generated)  
         state_matrix: Internal list of lists for building (use get_matrix() for NumPy access)
         state_timers: Internal list of timer durations (use get_state_timers() for NumPy access)
         state_outputs: Internal list of output configs (use get_outputs() for NumPy access)
-        serial_outputs: List of serial output values for each state
+        integer_outputs: List of numeric output values for each state
         states: Bidirectional dictionary mapping state names to indices and vice versa
         events_dict: Dictionary mapping event names to column indices
         extra_timers_names: List of extra timer names
@@ -78,47 +77,46 @@ class StateMatrix():
         Use get_*() methods to obtain validated NumPy arrays for runtime efficiency.
         The START state (state 0) and END state (last state) are managed automatically.
     """
-    def __init__(self, inputs: Optional[Dict[str, int]] = None, 
-                 outputs: Optional[Dict[str, int]] = None,
+    def __init__(self, inputs: List[str], 
+                 outputs: List[str],
                  extratimers: Optional[List[str]] = None) -> None:
         """
         Initialize StateMatrix.
         
         Args:
-            inputs: Dictionary mapping input names to their integer indices.
+            inputs: List of input names. Indices will be assigned sequentially starting from 0.
                    Used to define available input events (e.g., port entries/exits).
-            outputs: Dictionary mapping output names to their integer indices.
+                   Pass an empty list [] if no inputs are needed.
+            outputs: List of output names. Indices will be assigned sequentially starting from 0.
                     Used to define available outputs (e.g., valves, LEDs).
+                    Pass an empty list [] if no outputs are needed.
             extratimers: List of extra timer names. These timers can be triggered
                         by specific states and continue running across state transitions.
 
         Note:
-            The state matrix automatically creates a START state as state 0 and
-            an END state as the last state when get_matrix() is called.
+            The state matrix automatically creates an END state as state 0 and
+            a START state as state 1 when initialized.
 
         Example:
             >>> sm = StateMatrix(
-            ...     inputs={'center': 0, 'left': 1, 'right': 2},
-            ...     outputs={'valve': 0, 'led': 1},
+            ...     inputs=['center', 'left', 'right'],
+            ...     outputs=['valve', 'led'],
             ...     extratimers=['punishment_timer']
             ... )
         """
         # Handle mutable default arguments
-        if inputs is None:
-            inputs = {}
-        if outputs is None:
-            outputs = {}
         if extratimers is None:
             extratimers = []
-            
-        self.inputs_dict = inputs
-        self.outputs_dict = outputs
+        
+        # Create dictionaries with sequential indices starting from 0
+        self.inputs_dict = {name: idx for idx, name in enumerate(inputs)}
+        self.outputs_dict = {name: idx for idx, name in enumerate(outputs)}
 
         # Initialize lists that will grow as needed
         self.state_matrix = []
         self.state_timers = []
         self.state_outputs = []
-        self.serial_outputs = []
+        self.integer_outputs = []
 
         self.states = bidict()
 
@@ -132,7 +130,7 @@ class StateMatrix():
         self.extra_timers_triggers = []
 
         # This dictionary is modified if ExtraTimers are used.
-        self.events_dict = {}
+        self.events_dict = bidict()
         for key,val in self.inputs_dict.items():
             self.events_dict[key+'in'] = 2*val
             self.events_dict[key+'out'] = 2*val+1
@@ -164,9 +162,9 @@ class StateMatrix():
             for backward compatibility.
         """
         statemat_group = h5file.create_group('/stateMatrix')
-        utils.append_dict_to_HDF5(statemat_group,'eventsNames',self.events_dict)
-        utils.append_dict_to_HDF5(statemat_group,'outputsNames',self.outputs_dict)
-        utils.append_dict_to_HDF5(statemat_group,'statesNames',dict(self.states))
+        utils.append_dict_to_hdf5(statemat_group,'eventsNames',self.events_dict)
+        utils.append_dict_to_hdf5(statemat_group,'outputsNames',self.outputs_dict)
+        utils.append_dict_to_hdf5(statemat_group,'statesNames',dict(self.states))
 
         #TODO: save names of extratimers and index corresponding to the event for each.
         #      note that you have to add nInputEvents to the index of each timer.
@@ -193,39 +191,44 @@ class StateMatrix():
 
     def _init_mat(self) -> None:
         """
-        Initialize state transition matrix with the START state.
+        Initialize state transition matrix with END and START states.
         
-        Creates the initial state matrix with a START state (state 0)
-        that has a very long timer. This state serves as the starting point
-        for the state machine in every trial.
+        Creates the initial state matrix with:
+        - END state (state 0): Waiting state between trials with infinite timer
+        - START state (state 1): Entry point for each trial with zero timer
+        
+        The END state serves as a waiting state where the machine waits
+        until it is forced to transition to the START state for the next trial.
         
         Raises:
-            Exception: If called when the state matrix already has more than
-                      one state, indicating that extra timers should be created
-                      before any states.
+            Exception: If called when the state matrix already has states,
+                      indicating that extra timers should be created before any states.
         """
-        if len(self.state_matrix)>1:
+        if len(self.state_matrix) > 0:
             raise Exception('You need to create all extra timers before creating any state.')
-        self.add_state(name='START', statetimer=0)
-        # Set START state to transition to state 1 on timeout
-        self._force_transition(0, 1)
+        
+        # Create END state (state 0) - waiting state with infinite timer
+        self.add_state(name='END', statetimer=INFINITE_TIME)
+        
+        # Create START state (state 1) - entry point with zero timer
+        #self.add_state(name='START', statetimer=0)
+        
+        # Ensure START state transitions to state 2 (first user state will be there)
+        #self._ensure_start_state_properties()
 
-    def _force_transition(self, origin_state_id: int, destination_state_id: int) -> None:
+    def _ensure_start_state_properties(self) -> None:
         """
-        Set a timeout transition between two states using state IDs.
+        Ensure START state transitions to state 2 with a timer of 0.
         
-        Directly modifies the state matrix to create a transition on the 'Tup'
-        (timeout) event from the origin state to the destination state.
-        
-        Args:
-            origin_state_id: Index of the state to transition from
-            destination_state_id: Index of the state to transition to
-            
-        Note:
-            This method bypasses the normal state name resolution and works
-            directly with state indices for efficiency.
+        This maintains the special behavior of the START state as the entry point
+        for each trial. The START state (index 1) transitions to state 2 where
+        the first user-defined state will be located.
         """
-        self.state_matrix[origin_state_id][self.events_dict['Tup']] = destination_state_id
+        if 'START' in self.states and self.states['START'] == 1:
+            self.state_matrix[1][self.events_dict['Tup']] = 2  # Transition to state 2
+            self.state_timers[1] = 0  # Zero duration timer
+        else:
+            raise Exception('The START state must be at index 1.')
 
     def _append_state_to_list(self, state_name: str) -> None:
         """
@@ -248,7 +251,7 @@ class StateMatrix():
             self.state_matrix.append([])
             self.state_timers.append(INFINITE_TIME)  # Default to infinite timer
             self.state_outputs.append(self.n_outputs*[NOCHANGE])
-            self.serial_outputs.append(0)
+            self.integer_outputs.append(0)
             
         # Create default row for this state (all events transition to itself)
         self.state_matrix[state_ind] = self._make_default_row(state_ind)
@@ -258,7 +261,7 @@ class StateMatrix():
                   outputsOn: Optional[List[str]] = None, 
                   outputsOff: Optional[List[str]] = None, 
                   trigger: Optional[List[str]] = None, 
-                  serialOut: int = 0) -> None:
+                  integerOut: int = 0) -> None:
         """
         Add a state to the transition matrix.
         
@@ -278,8 +281,8 @@ class StateMatrix():
             outputsOff: List of output names to turn OFF when entering this state.
             trigger: List of extra timer names to start/trigger when entering
                     this state.
-            serialOut: Integer (1-255) to send through serial port when entering
-                      this state. A value of 0 means no serial output.
+            integerOut: Integer output when entering this state. A value of 0 means
+                    no numeric output.
                       
         Example:
             >>> sm.add_state(
@@ -288,7 +291,7 @@ class StateMatrix():
             ...     transitions={'centerin': 'reward_state'},
             ...     outputsOn=['led'],
             ...     outputsOff=['valve'],
-            ...     serialOut=1
+            ...     integerOut=1
             ... )
         """
         # Handle mutable default arguments
@@ -329,7 +332,7 @@ class StateMatrix():
         for one_output in outputsOff:
             output_ind = self.outputs_dict[one_output]
             self.state_outputs[this_state_ind][output_ind] = 0
-        self.serial_outputs[this_state_ind] = serialOut
+        self.integer_outputs[this_state_ind] = integerOut
 
         # -- Add this state to the list of triggers for extra timers --
         for one_extra_timer in trigger:
@@ -386,46 +389,24 @@ class StateMatrix():
             raise Exception(f'The state matrix has no extratimer called {name}.')
         self.extra_timers_duration[self.extra_timers_names.index(name)] = duration
 
-    def _ensure_end_state(self) -> None:
-        """
-        Ensure an END state exists as the last state.
-        
-        Creates an END state with infinite timer if it doesn't already exist.
-        The END state serves as a waiting state where the machine can wait
-        until it is forced to transition to the START state for the next trial.
-        """
-        if 'END' not in self.states:
-            # Add END state with infinite timer that loops back to itself
-            self.add_state(name='END', statetimer=INFINITE_TIME)
-
     def get_matrix(self) -> np.ndarray:
         """
         Get the state transition matrix as a NumPy array.
         
-        Validates the matrix for consistency (ensuring all referenced states exist),
-        adds an END state as the last state if not already present, and converts
-        from the internal Python list representation to a NumPy array for efficient
-        runtime use.
+        Validates the matrix for consistency (ensuring all referenced states exist)
+        and converts from the internal Python list representation to a NumPy array 
+        for efficient runtime use.
         
         Returns:
             NumPy array of shape (n_states, n_events) with state transition matrix.
             Each element [i,j] represents the target state when state i receives event j.
-            The END state is automatically added as the final state and serves as
-            a waiting state for the next trial.
+            The END state is always at index 0 and serves as a waiting state for 
+            the next trial.
             
         Raises:
             ValueError: If matrix is empty, has invalid dimensions, or contains
                        state indices outside the valid range [0, n_states-1].
         """
-        # Ensure END state exists as the last state
-        self._ensure_end_state()
-        
-        # Remove any empty rows at the end
-        #actual_matrix = [row for row in self.state_matrix if row]
-        
-        #if not actual_matrix:
-        #    raise ValueError("State matrix is empty")
-            
         # Convert to numpy array
         matrix_array = np.array(self.state_matrix, dtype=np.int32)
 
@@ -440,13 +421,35 @@ class StateMatrix():
             
         return matrix_array
 
+    def get_state_timers(self) -> np.ndarray:
+        """
+        Get the state timers as a NumPy array.
+        
+        Filters and validates the timer list to include only timers for states 
+        that actually exist in the state matrix.
+        
+        Returns:
+            NumPy array of timer durations for each state in seconds.
+            Array length matches the number of valid states.
+        """
+        if not self.state_timers:
+            return np.empty(0, dtype=np.float64)
+            
+        # Only include timers for states that actually exist
+        actual_timers = []
+        for i, timer in enumerate(self.state_timers):
+            if i < len(self.state_matrix) and self.state_matrix[i]:
+                actual_timers.append(timer)
+                
+        return np.array(actual_timers, dtype=np.float64)
+
     def get_outputs(self) -> np.ndarray:
         """
         Get the state outputs matrix as a NumPy array.
         
-        Ensures the END state exists, then filters and validates the outputs list
-        to include only outputs for states that actually exist in the state matrix.
-        Validates that all output values are within the allowed range.
+        Filters and validates the outputs list to include only outputs for states 
+        that actually exist in the state matrix. Validates that all output values 
+        are within the allowed range.
         
         Returns:
             NumPy array of shape (n_states, n_outputs) with output configurations.
@@ -455,9 +458,6 @@ class StateMatrix():
         Raises:
             ValueError: If any output values are outside the valid range [-1, 0, 1].
         """
-        # Ensure END state exists
-        self._ensure_end_state()
-        
         if not self.state_outputs:
             return np.empty((0, self.n_outputs), dtype=np.int32)
             return np.empty((0, self.n_outputs), dtype=np.int32)
@@ -479,31 +479,12 @@ class StateMatrix():
             raise ValueError("State outputs must contain only -1 (no change), 0 (off), or 1 (on)")
             
         return outputs_array
-
-    def get_state_timers(self) -> np.ndarray:
+    
+    def get_integer_outputs(self) -> np.ndarray:
         """
-        Get the state timers as a NumPy array.
-        
-        Ensures the END state exists, then filters and validates the timer list
-        to include only timers for states that actually exist in the state matrix.
-        
-        Returns:
-            NumPy array of timer durations for each state in seconds.
-            Array length matches the number of valid states.
+        Get the integer outputs as a NumPy array.
         """
-        # Ensure END state exists
-        self._ensure_end_state()
-        
-        if not self.state_timers:
-            return np.empty(0, dtype=np.float64)
-            
-        # Only include timers for states that actually exist
-        actual_timers = []
-        for i, timer in enumerate(self.state_timers):
-            if i < len(self.state_matrix) and self.state_matrix[i]:
-                actual_timers.append(timer)
-                
-        return np.array(actual_timers, dtype=np.float64)
+        return np.array(self.integer_outputs, dtype=np.int32)
 
     def get_timer_event_index(self) -> int:
         """
@@ -565,25 +546,32 @@ class StateMatrix():
         Resets all states to have self-transitions for all events, very long
         timers, and unchanged output configurations. This effectively clears
         all custom transitions while preserving the state structure.
+        The START state (index 1) is treated specially - it keeps its zero
+        timer and transitions to state 2 if it exists.
         
         Note:
             This method preserves the states themselves but removes all
             custom transition logic, timers, and output configurations.
+            The START state maintains its special behavior.
         """
         for state_ind in self.states.inverse.keys():
             self.state_matrix[state_ind] = self._make_default_row(state_ind)
             self.state_timers[state_ind] = INFINITE_TIME
             self.state_outputs[state_ind] = self.n_outputs*[NOCHANGE]
+        
+        # Restore special START state behavior
+        #self._ensure_start_state_properties()
 
-    def get_serial_outputs(self) -> List[int]:
+    def get_integer_outputs(self) -> List[int]:
         """
-        Get the serial output values for all states.
+        Get the num output values for all states.
         
         Returns:
-            List of integers representing serial output values for each state.
-            0 means no serial output, 1-255 are valid output codes.
+            List of integers representing num output values for each state.
+            0 means no num output. A positive number will turn that output ON,
+            a negative number will turn that output OFF.
         """
-        return self.serial_outputs
+        return self.integer_outputs
 
     def get_extra_timers(self) -> List[float]:
         """
@@ -615,6 +603,15 @@ class StateMatrix():
             - Reverse mapping: states.inverse[index] -> 'state_name'
         """
         return self.states
+    
+    def get_end_state_index(self) -> int:
+        """
+        Get the index of the END state.
+        
+        Returns:
+            Integer index of the END state, which is always 0.
+        """
+        return 0  # END state is always at index 0
 
     def __str__(self) -> str:
         """
@@ -623,7 +620,7 @@ class StateMatrix():
         Formats the state matrix as a table showing:
         - Extra timer information
         - Column headers for events
-        - Each state with its transitions, timers, outputs, and serial codes
+        - Each state with its transitions, timers, outputs, and num codes
         
         Returns:
             Multi-line string representation of the complete state matrix
@@ -636,8 +633,8 @@ class StateMatrix():
             if key!='Forced':
                 rev_events_dict[self.events_dict[key]] = key
         mat_str += '\t\t\t'
-        mat_str += '\t'.join([rev_events_dict[k][0:4] for k in sorted(rev_events_dict.keys())])
-        mat_str += '\t\tTimers\tOutputs\tSerialOut'
+        mat_str += '\t'.join([rev_events_dict[k][0:5] for k in sorted(rev_events_dict.keys())])
+        mat_str += '\t\tTimers\tOutputs\tintegerOut'
         mat_str += '\n'
         sm = self.get_matrix()
         for (index, one_row) in enumerate(sm):
@@ -645,7 +642,7 @@ class StateMatrix():
             mat_str += '\t'.join(str(e) for e in one_row)
             mat_str += f'\t|\t{self.state_timers[index]:0.2f}'
             mat_str += f'\t{self._output_as_str(self.state_outputs[index])}'
-            mat_str += f'\t{self.serial_outputs[index]}'
+            mat_str += f'\t{self.integer_outputs[index]}'
             mat_str += '\n'
         return mat_str
 
@@ -686,3 +683,15 @@ class StateMatrix():
             else:
                 output_str += '-'
         return output_str
+    
+
+if __name__ == '__main__':
+    # Example usage of the StateMatrix class
+    sm = StateMatrix(inputs=[], outputs=[])
+    print(sm)    
+    print(f'End state index: {sm.get_end_state_index()}')
+
+    import h5py
+    h5file = h5py.File('/tmp/test.h5', 'w')
+    sm.append_to_file(h5file, 0)
+
