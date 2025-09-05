@@ -1,5 +1,5 @@
 """
-Examples task where sound is presented when an object enters ROI.
+Examples task where sound is presented when an object enters INITZONE.
 User must indicate with arrow keys whether sound came from left or right.
 """
 
@@ -22,7 +22,8 @@ FEEDBACK_DURATION = 1000  # In milliseconds
 # -- Settings for object tracking --
 BLACK_THRESHOLD = 50  # Theshold for binarizing the video frame
 MIN_AREA = 4000  # Minimum area of the object to be considered valid for tracking
-ROI = (320, 240, 40)  # (center_x, center_y, radius) of the region of interest (ROI)
+DEFAULT_INITZONE = [320, 240, 80]  # [center_x, center_y, radius] of the region of interest (INITZONE)
+DEFAULT_MASK = [320, 240, 240]  # [center_x, center_y, radius] of the region to mask (MASK)
 
 # --- Application States ---
 STATE_MONITORING = 0
@@ -31,19 +32,25 @@ STATE_WAITING_FOR_INPUT = 2
 STATE_FEEDBACK = 3
 
 class Task(gui.MainWindow):
-    #object_in_roi = pyqtSignal()
+    #object_in_initzone = pyqtSignal()
 
     def __init__(self):
         super().__init__()
+
+        self.initzone = DEFAULT_INITZONE
+        self.mask = DEFAULT_MASK
+
         # -- Additional GUI --
         self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold", value=BLACK_THRESHOLD)
         self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Min area", value=MIN_AREA)
+        self.initzone_radius_slider = gui.SliderWidget(maxvalue=300, label="IZ radius", value=self.initzone[2])
+        self.mask_radius_slider = gui.SliderWidget(maxvalue=300, label="Mask radius", value=self.mask[2])
         self.status_label = gui.StatusWidget()
         self.session_control = gui.SessionControlWidget()
 
         self.params = gui.Container()
         self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
-        self.params['sessionDuration'] = gui.NumericParam('Duration', value=4, units='s',
+        self.params['sessionDuration'] = gui.NumericParam('Duration', value=60, units='s',
                                                         group='Session info')
         self.params['sessionTime'] = gui.NumericParam('Session time', value=0, enabled=False,
                                                       units='s', decimals=1, group='Session info')
@@ -51,6 +58,8 @@ class Task(gui.MainWindow):
 
         self.layout.addWidget(self.threshold_slider)
         self.layout.addWidget(self.minarea_slider)
+        self.layout.addWidget(self.initzone_radius_slider)
+        self.layout.addWidget(self.mask_radius_slider)
         self.layout.addWidget(self.status_label)
         hbox = gui.QHBoxLayout()
         hbox.addWidget(self.session_control)
@@ -61,6 +70,7 @@ class Task(gui.MainWindow):
         self.session_running = False
         self.current_state = STATE_MONITORING
         self.correct_channel = None
+        self.inside_initzone = False
 
         self.start_video_thread()
         self.sound_player = soundmodule.SoundPlayer()
@@ -74,6 +84,8 @@ class Task(gui.MainWindow):
         # -- Connect signals from GUI --
         self.threshold_slider.value_changed.connect(self.update_threshold)
         self.minarea_slider.value_changed.connect(self.update_minarea)
+        self.initzone_radius_slider.value_changed.connect(self.update_initzone)
+        self.mask_radius_slider.value_changed.connect(self.update_mask)
         self.session_control.resume.connect(self.start_session)
         self.session_control.pause.connect(self.stop_session)
 
@@ -113,50 +125,62 @@ class Task(gui.MainWindow):
 
     def update_minarea(self, value):
         self.video_thread.set_minarea(value)
-        
+
+    def update_initzone(self, radius):
+        self.initzone[2] = radius
+
+    def update_mask(self, radius):
+        self.mask[2] = radius
+        self.video_thread.set_circular_mask(self.mask)
+
     def start_video_thread(self):
         """Starts the video capture thread and connects its signals."""
         self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, mode=DISPLAY_MODE,
                                                     tracking=True)
         self.video_thread.set_threshold(self.threshold_slider.value)
         self.video_thread.set_minarea(self.minarea_slider.value)
+        self.video_thread.set_circular_mask(self.mask)
         self.video_thread.frame_processed.connect(self.update_image)
         self.video_thread.start()
 
     def update_image(self, timestamp, frame, points):
         """Updates the video display label with new frames and points."""
         if self.session_running:
-            self.check_roi(points[0])  # Send first point: centroid
+            self.check_initzone(points[0])  # Send first point: centroid
             self.frame_data['timestamp'].append(timestamp)
             # FIXME: is the centroid point (x, y) or (row, col)?
             self.frame_data['centroid_x'].append(points[0][0])
             self.frame_data['centroid_y'].append(points[0][1])
-        self.video_widget.display_frame(frame, points, ROI)
+        self.video_widget.display_frame(frame, points, self.initzone, self.mask)
         if self.session_running:
             self.params['sessionTime'].set_value(timestamp - self.session_start_time)
             if timestamp - self.session_start_time >= self.params['sessionDuration'].get_value():
                 self.session_control.stop()
 
-    def check_roi(self, point):
+    def check_initzone(self, point):
         """
-        Slot to receive the object's center and check if it's in the ROI.
+        Slot to receive the object's center and check if it's in the INITZONE.
         """
-        distance = np.sqrt((point[0] - ROI[0])**2 +
-                           (point[1] - ROI[1])**2)
+        distance = np.sqrt((point[0] - self.initzone[0])**2 +
+                           (point[1] - self.initzone[1])**2)
 
-        if distance <= ROI[2]:
-            # The object is inside the ROI, handle the event (or emit signal)
-            #print('Object in ROI detected:', point)
-            #self.object_in_roi.emit()
-            self.handle_object_in_roi()
+        if distance <= self.initzone[2]:
+            # The object is inside the INITZONE, handle the event (or emit signal)
+            #print('Object in INITZONE detected:', point)
+            #self.object_in_initzone.emit()
+            if not self.inside_initzone:
+                self.inside_initzone = True
+                self.handle_entered_initzone()
+        else:
+            self.inside_initzone = False
 
-    def handle_object_in_roi(self):
+    def handle_entered_initzone(self):
         """
-        Called when object enters the ROI. Triggers sound playback
+        Called when object enters the INITZONE. Triggers sound playback
         and transitions the application state.
         """
         if self.current_state == STATE_MONITORING:
-            #print("Object in ROI detected. Playing sound.")
+            #print("Object in INITZONE detected. Playing sound.")
             self.current_state = STATE_SOUND_PLAYING
             self.status_label.setText("Sound playing... Listen carefully!")
             self.play_random_sound()
