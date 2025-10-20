@@ -16,13 +16,15 @@ from phonotaxis import utils
 BUTTON_COLORS = {'start': 'limegreen', 'stop': 'red'}
 LABEL_WIDTH = 120
 
-class MainWindow(QMainWindow):
+IZ_COLOR = (52, 101, 164)  # RGB for Tango Sky Blue
+CENTROID_COLOR = (239, 41, 41)  # RGB for Tango Scarlet Red
+
+class OBSOLETE_MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Phonotaxis task")
         self.setGeometry(100, 100, 800, 600)
         self.setWindowIcon(self.create_icon())
-        self.current_threshold = 10
         self.init_ui()
         
     def create_icon(self):
@@ -49,6 +51,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         event.accept()
 
+
 def create_icon():
     """Creates a simple icon using a Font Awesome-like character."""
     pixmap = QPixmap(64, 64)
@@ -61,6 +64,7 @@ def create_icon():
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "🔊")
     painter.end()
     return QIcon(pixmap)
+
 
 class StatusWidget(QLabel):
     def __init__(self):
@@ -223,6 +227,7 @@ class ParamGroupLayout(QGridLayout):
         self.addWidget(labelWidget, currentRow, 0, Qt.AlignmentFlag.AlignRight)
         self.addWidget(editWidget, currentRow, 1, Qt.AlignmentFlag.AlignLeft)
 
+
 class GenericParam(QWidget):
     """Generic class to use as parent for parameter classes."""
     def __init__(self, labelText='', value=0, group=None,
@@ -335,6 +340,7 @@ class NumericParam(GenericParam):
     def add(self, value):
         self.set_value(self.get_value()+value)
 
+
 class MenuParam(GenericParam):
     def __init__(self, labelText='', menuItems=(), value=0, group=None,
                  history=True, labelWidth=LABEL_WIDTH, enabled=True, parent=None):
@@ -379,9 +385,6 @@ class MenuParam(GenericParam):
     def get_items(self):
         return self._items
     
-# class SessionWidger(QWidget):
-#     """
-#     A widget that contains """
 
 class SessionControlWidget(QWidget):
     resume = pyqtSignal()
@@ -444,7 +447,7 @@ class VideoWidget(QWidget):
         super().__init__()
         #self.setGeometry(100, 100, 800, 600)
         self.layout = QVBoxLayout(self)
-        self.video_label = QLabel("Waiting for camera feed...")
+        self.video_label = QLabel("Placeholder for video")  # ("Waiting for camera feed...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: #222; color: #fff;" +
                                        "border-radius: 6px;")
@@ -475,7 +478,7 @@ class VideoWidget(QWidget):
         #print(roi[2]); print('------------------------')
         #print(points); print('------------------------')
         if len(initzone):
-            self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=(0,0,255))
+            self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=IZ_COLOR) # SkyBlue
         if len(mask):
             self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240))
             #self.add_rectangular_roi(pixmap, mask)
@@ -504,7 +507,7 @@ class VideoWidget(QWidget):
         """
         painter = QPainter(pixmap)
         painter.setPen(Qt.PenStyle.NoPen)  # No border
-        painter.setBrush(Qt.GlobalColor.red)
+        painter.setBrush(QColor(*CENTROID_COLOR))
         painter.drawEllipse(point[0] - 5, point[1] - 5, 10, 10)
         painter.end()
 
@@ -537,7 +540,7 @@ class VideoWidget(QWidget):
             alpha = int(255 * (ind + 1) / len(self.first_point_trail))
             
             # Create color with alpha
-            color = QColor(255, 0, 0, alpha)  # Red with varying alpha
+            color = QColor(*CENTROID_COLOR, alpha)  # Centroid color with varying alpha
             painter.setPen(Qt.PenStyle.NoPen)  # No border
             painter.setBrush(color)
             
@@ -566,7 +569,7 @@ class VideoWidget(QWidget):
             self.first_point_trail.pop(0)
 
     def add_circular_roi(self, pixmap: QPixmap, center: tuple, radius: int,
-                color: tuple = (0,0,255)) -> QPixmap:
+                color: tuple = (32,74,135)) -> QPixmap:
         """
         Draw a circular region of interest on a QPixmap.
         """

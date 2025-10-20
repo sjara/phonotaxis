@@ -7,7 +7,8 @@ import os
 import time
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
+from PyQt6.QtCore import Qt, QTimer
 from phonotaxis import gui
 from phonotaxis import videomodule
 from phonotaxis import soundmodule
@@ -31,14 +32,22 @@ STATE_SOUND_PLAYING = 1
 STATE_WAITING_FOR_INPUT = 2
 STATE_FEEDBACK = 3
 
-class Task(gui.MainWindow):
-    #object_in_initzone = pyqtSignal()
-
+class Task(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("Phonotaxis task")
+        self.setGeometry(100, 100, 800, 600)
+        self.setWindowIcon(gui.create_icon())
 
         self.initzone = DEFAULT_INITZONE
         self.mask = DEFAULT_MASK
+
+        # -- Define main GUI layout --
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QVBoxLayout(self.central_widget)
+        self.video_widget = gui.VideoWidget()
+        self.layout.addWidget(self.video_widget)
 
         # -- Additional GUI --
         self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold", value=BLACK_THRESHOLD)
