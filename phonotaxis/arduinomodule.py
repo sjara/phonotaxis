@@ -10,7 +10,7 @@ It uses the pyfirmata2 package. Note that reading via polling is not supported b
 
 import time
 import threading
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal
 from pyfirmata2 import Arduino
 from phonotaxis import config
 
@@ -36,7 +36,7 @@ class ArduinoThread(QThread):
         """
         Args:
             port (str): Arduino serial port. If None, uses config.ARDUINO_PORT.
-            n_inputs (int): Number of analog inputs to monitor. If None, uses config.ARDUINO_N_ANALOG_INPUTS.
+            n_inputs (int): Number of analog inputs to monitor. If None, uses len(config.INPUT_PINS).
             thresholds (dict): Dictionary mapping pin numbers to threshold values.
                              Example: {0: 0.5, 1: 0.3} sets thresholds for pins A0 and A1.
                              If None, no thresholds are set (only raw values are emitted).
@@ -44,12 +44,13 @@ class ArduinoThread(QThread):
         """
         super().__init__()
         self.port = port or config.ARDUINO_PORT
-        self.n_inputs = n_inputs or config.ARDUINO_N_ANALOG_INPUTS
+        self.n_inputs = n_inputs or len(config.INPUT_PINS)
         self.thresholds = thresholds or {}
         self.debug = debug
         self._run_flag = True
         self.board = None
         self.analog_pins = []
+        self.digital_output_pins = {}  # Store digital output pin objects by name
         self.previous_values = {}
         self.previous_states = {}  # Track whether each pin is above/below threshold
         self._lock = threading.Lock()
@@ -81,6 +82,16 @@ class ArduinoThread(QThread):
                 
                 if self.debug:
                     print(f"Set up analog pin A{pin_num}")
+            
+            # Set up digital output pins
+            for pin_name, pin_num in config.OUTPUT_PINS.items():
+                pin = self.board.get_pin(f'd:{pin_num}:o')
+                self.digital_output_pins[pin_name] = pin
+                # Initialize all outputs to LOW
+                pin.write(0)
+                
+                if self.debug:
+                    print(f"Set up digital output pin D{pin_num} ({pin_name})")
             
             self.arduino_ready.emit()
             if self.debug:
@@ -178,6 +189,32 @@ class ArduinoThread(QThread):
         """
         with self._lock:
             return self.previous_values.copy()
+
+    def set_digital_output(self, pin_name, state):
+        """
+        Set the state of a digital output pin.
+        
+        Args:
+            pin_name (str): The name of the output pin as defined in config.OUTPUT_PINS.
+                          Example: 'water1', 'water2'
+            state (bool or int): The desired state. True/1 for HIGH, False/0 for LOW.
+        
+        Raises:
+            ValueError: If pin_name is not found in configured output pins.
+        """
+        with self._lock:
+            if pin_name not in self.digital_output_pins:
+                raise ValueError(f"Pin '{pin_name}' not found in configured output pins. "
+                               f"Available pins: {list(self.digital_output_pins.keys())}")
+            
+            pin = self.digital_output_pins[pin_name]
+            value = 1 if state else 0
+            pin.write(value)
+            
+            if self.debug:
+                state_str = "HIGH" if value else "LOW"
+                pin_num = config.OUTPUT_PINS[pin_name]
+                print(f"Set digital output {pin_name} (D{pin_num}) to {state_str}")
 
     def run(self):
         """
