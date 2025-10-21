@@ -1,6 +1,6 @@
 """
-Examples task where sound is presented when an object enters INITZONE.
-User must indicate with arrow keys whether sound came from left or right.
+Example task where a sound is presented when an object enters the initiation zone.
+The user must indicate with arrow keys whether sound came from left or right.
 """
 
 import os
