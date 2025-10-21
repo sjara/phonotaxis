@@ -10,6 +10,7 @@ import pandas as pd
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
 from PyQt6.QtCore import Qt, QTimer
 from phonotaxis import gui
+from phonotaxis import widgets
 from phonotaxis import videomodule
 from phonotaxis import soundmodule
 from phonotaxis import config
@@ -46,17 +47,16 @@ class Task(QMainWindow):
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
-        self.video_widget = gui.VideoWidget()
+        self.video_widget = widgets.VideoWidget()
         self.layout.addWidget(self.video_widget)
 
         # -- Additional GUI --
-        self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold", value=BLACK_THRESHOLD)
-        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Min area", value=MIN_AREA)
-        self.initzone_radius_slider = gui.SliderWidget(maxvalue=300, label="IZ radius", value=self.initzone[2])
-        self.mask_radius_slider = gui.SliderWidget(maxvalue=300, label="Mask radius", value=self.mask[2])
-        self.status_label = gui.StatusWidget()
-        self.session_control = gui.SessionControlWidget()
-
+        self.threshold_slider = widgets.SliderWidget(maxvalue=255, label="Threshold", value=BLACK_THRESHOLD)
+        self.minarea_slider = widgets.SliderWidget(maxvalue=16000, label="Min area", value=MIN_AREA)
+        self.initzone_radius_slider = widgets.SliderWidget(maxvalue=300, label="IZ radius", value=self.initzone[2])
+        self.mask_radius_slider = widgets.SliderWidget(maxvalue=300, label="Mask radius", value=self.mask[2])
+        self.status_label = widgets.StatusWidget()
+        self.session_control = widgets.SessionControlWidget()
         self.params = gui.Container()
         self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
         self.params['sessionDuration'] = gui.NumericParam('Duration', value=60, units='s',

@@ -5,6 +5,7 @@ Track object on video and use a slider to set the threshold for binarizing video
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
 from phonotaxis import videomodule
 from phonotaxis import gui
+from phonotaxis import widgets
 from phonotaxis import config
 
 CAMERA_INDEX = config.CAMERA_INDEX
@@ -22,9 +23,9 @@ class TestVideoThreshold(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
 
-        self.video_widget = gui.VideoWidget()
-        self.threshold_slider = gui.SliderWidget(maxvalue=255, label="Threshold")
-        self.minarea_slider = gui.SliderWidget(maxvalue=16000, label="Min area")
+        self.video_widget = widgets.VideoWidget()
+        self.threshold_slider = widgets.SliderWidget(maxvalue=255, label="Threshold")
+        self.minarea_slider = widgets.SliderWidget(maxvalue=16000, label="Min area")
 
         self.layout.addWidget(self.video_widget)
         self.layout.addWidget(self.threshold_slider)
