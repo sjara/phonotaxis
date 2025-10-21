@@ -13,18 +13,10 @@ Modules for developing sound localization tasks that use video tracking.
   * Make a copy of `config_template.py` and call it `config.py`.
   * Edit your config.py file if necessary.
 5. Test the installation:
-  * `python tests/test_gui_minimal.py`
+  * `python examples/example_gui_minimal.py`
   * You should see a window with minimal text on it.
-
-## ADDITIONAL TESTS:
-1. Test video and object tracking:
-  * `python tests/test_video_tracking.py`
-  * You should see a window with b/w video from your camera and red dot tracking a black object.
-2. Test adding the session controller and parameters:
-  * `python tests/test_gui_parameters.py`
-  * This will show a window with a green "Start" button and some text boxes for parameters.
 
 ## CONTENTS
 * `phonotaxis`: core modules.
-* `tests`: test scripts for each capability (video, arduino, etc).
-* `examples`: example scripts for creating full tasks (which we call paradigms).
+* `tests`: unit tests for each module.
+* `examples`: example scripts for demonstrating basic features and full tasks (which we call paradigms).
