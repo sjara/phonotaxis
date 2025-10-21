@@ -367,7 +367,7 @@ INPUT_INDICATOR_STYLE_BELOW = """
 
 INPUT_INDICATOR_STYLE_ABOVE = """
     QLabel {
-        background-color: #4CAF50;
+        background-color: #c4a000;
         border: 1px solid #45a049;
         border-radius: 4px;
         padding: 8px;
@@ -379,7 +379,6 @@ INPUT_INDICATOR_STYLE_ABOVE = """
         min-width: 80px;
     }
 """
-
 
 class ArduinoControlWidget(QWidget):
     """
