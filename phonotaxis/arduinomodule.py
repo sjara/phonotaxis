@@ -6,9 +6,16 @@ which has the standard firmata loaded into it and provides Qt signals
 when analog inputs cross configurable thresholds.
 
 It uses the pyfirmata2 package. Note that reading via polling is not supported by this library.
+
+Threading architecture:
+- ArduinoThread is a QThread primarily for non-blocking Arduino connection during startup.
+- pyfirmata2 internally manages its own background thread for serial communication.
+- Callbacks registered with pyfirmata2 run in pyfirmata2's background thread, not in the QThread.
+- The QThread's run() loop simply keeps the connection alive; actual data acquisition happens
+  independently in pyfirmata2's thread.
+- Thread-safe access to shared data (thresholds, values) is protected by threading.Lock.
 """
 
-import time
 import threading
 from PyQt6.QtCore import QThread, pyqtSignal
 from pyfirmata2 import Arduino
@@ -30,7 +37,7 @@ class ArduinoThread(QThread):
     arduino_ready = pyqtSignal()
     arduino_error = pyqtSignal(str)
     threshold_crossed = pyqtSignal(int, float, bool)  # pin, value, is_rising_edge
-    analog_value_acquired = pyqtSignal(int, float)  # pin, value
+    #analog_value_acquired = pyqtSignal(int, float)  # pin, value --- IGNORE ---
 
     def __init__(self, port=None, n_inputs=None, thresholds=None, debug=False):
         """
@@ -67,6 +74,7 @@ class ArduinoThread(QThread):
                 print(f"Connecting to Arduino on port: {self.port}")
             
             self.board = Arduino(self.port)
+            self.board.samplingOn(10)  # Set sampling interval (in ms)
             
             # Set up analog pins
             for pin_num in range(self.n_inputs):
@@ -120,9 +128,6 @@ class ArduinoThread(QThread):
             with self._lock:
                 if value is not None:
                     self.previous_values[pin_number] = value
-                    
-                    # Emit the raw analog value
-                    self.analog_value_acquired.emit(pin_number, value)
                     
                     # Check threshold crossing if threshold is set for this pin
                     if pin_number in self.thresholds:
@@ -219,6 +224,10 @@ class ArduinoThread(QThread):
     def run(self):
         """
         Main thread execution loop.
+        
+        With pyfirmata2's event-driven model, the board handles data reading
+        automatically in the background. This thread just needs to stay alive
+        to keep the connection active while callbacks process incoming data.
         """
         if not self.connect_arduino():
             return
@@ -227,12 +236,9 @@ class ArduinoThread(QThread):
             if self.debug:
                 print("Arduino monitoring started. Press stop to terminate.")
             
+            # Keep the thread alive while the board's background thread handles I/O
             while self._run_flag:
-                if self.board:
-                    self.board.iterate()
-                # Note: The actual update rate is set by board.samplingOn()
-                #       See https://github.com/berndporr/pyFirmata2
-                self.msleep(1)  # In ms
+                self.msleep(100)  # Sleep to reduce CPU usage
 
         except Exception as e:
             error_msg = f"Error in Arduino thread: {str(e)}"

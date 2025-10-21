@@ -67,7 +67,6 @@ class ArduinoTestWindow(QMainWindow):
         self.arduino_thread.arduino_ready.connect(self.on_arduino_ready)
         self.arduino_thread.arduino_error.connect(self.on_arduino_error)
         self.arduino_thread.threshold_crossed.connect(self.on_threshold_crossed)
-        self.arduino_thread.analog_value_acquired.connect(self.on_analog_value)
         
         self.arduino_thread.start()
         # Add threshold lines to plots
@@ -254,6 +253,30 @@ class ArduinoTestWindow(QMainWindow):
     
     def update_plots(self):
         """Update the real-time plots."""
+        # Poll current values from Arduino thread
+        if self.arduino_thread:
+            current_values = self.arduino_thread.get_current_values()
+            
+            # Update value labels and store data for plotting
+            for pin_number, value in current_values.items():
+                if pin_number in self.value_labels:
+                    self.value_labels[pin_number].setText(f"A{pin_number}: {value:.3f}")
+                
+                # Store data for plotting (only for pins we're plotting)
+                if pin_number in self.data_buffers:
+                    current_time = time.time()
+                    
+                    # Set start time with first data point
+                    if self.start_time is None:
+                        self.start_time = current_time
+                    
+                    # Calculate relative time
+                    relative_time = current_time - self.start_time
+                    
+                    # Add data to buffers for this specific pin
+                    self.time_buffers[pin_number].append(relative_time)
+                    self.data_buffers[pin_number].append(value)
+        
         # Update each plot
         for pin, line in self.lines.items():
             if pin in self.data_buffers and self.data_buffers[pin] and pin in self.time_buffers:
@@ -310,27 +333,6 @@ class ArduinoTestWindow(QMainWindow):
             message = f"Pin A{pin_number}: {edge_type} edge (value: {value:.3f})"
             self.threshold_label.setText(f"Event: {message}")
             #print(f"THRESHOLD CROSSED: {message}")
-    
-    def on_analog_value(self, pin_number, value):
-        """Handle analog value updates and store data for plotting."""
-        if self.plot_timer.isActive():
-            if pin_number in self.value_labels:
-                self.value_labels[pin_number].setText(f"A{pin_number}: {value:.3f}")
-            
-            # Store data for plotting (only for pins we're plotting)
-            if pin_number in self.data_buffers:
-                current_time = time.time()
-                
-                # Set start time with first data point
-                if self.start_time is None:
-                    self.start_time = current_time
-                
-                # Calculate relative time
-                relative_time = current_time - self.start_time
-                
-                # Add data to buffers for this specific pin
-                self.time_buffers[pin_number].append(relative_time)
-                self.data_buffers[pin_number].append(value)
     
     def closeEvent(self, event):
         """Handle window close event."""
