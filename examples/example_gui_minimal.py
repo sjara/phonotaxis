@@ -13,4 +13,4 @@ class Task(QMainWindow):
         self.setCentralWidget(self.video_widget)
 
 if __name__ == "__main__":
-    (app,paradigm) = gui.create_app(Task)
+    (app, paradigm) = gui.create_app(Task)

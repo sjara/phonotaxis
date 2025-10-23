@@ -56,4 +56,4 @@ class TestVideoThreshold(QMainWindow):
         event.accept()
         
 if __name__ == "__main__":
-    (app,paradigm) = gui.create_app(TestVideoThreshold)
+    (app, paradigm) = gui.create_app(TestVideoThreshold)
