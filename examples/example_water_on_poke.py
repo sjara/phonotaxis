@@ -44,9 +44,9 @@ class Task(QMainWindow):
         self.controller = controller.SessionController()
 
         # -- Connect signals from GUI --
-        self.controller.status_update.connect(self.on_timer_tick)
+        #self.controller.status_update.connect(self.on_timer_tick)
         self.controller.session_started.connect(self.start_session)
-        self.controller.session_stopped.connect(self.stop_session)
+        #self.controller.session_stopped.connect(self.stop_session)
         self.controller.prepare_next_trial.connect(self.prepare_next_trial)
 
         # -- Connect signals to messenger
