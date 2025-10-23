@@ -6,6 +6,7 @@ import sys
 import importlib.util
 import socket
 import time
+import signal
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout
 from PyQt6.QtWidgets import QWidget, QGridLayout, QSlider, QPushButton, QLineEdit, QGroupBox, QComboBox
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
@@ -416,7 +417,6 @@ class Messenger(QObject):
         return '\n'.join(self.get_list())
 
 
-
 def create_app(task_class):
 
     app = QApplication(sys.argv)
@@ -440,5 +440,7 @@ def create_app(task_class):
     window.show()
 
     # Start the application event loop
-    sys.exit(app.exec())
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # Enable Ctrl-C to exit
+    app.exec()
+    return (app, window)
 
