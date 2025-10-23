@@ -7,8 +7,8 @@ import os
 import time
 import numpy as np
 import pandas as pd
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QPushButton
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from phonotaxis import gui
 from phonotaxis import widgets
 from phonotaxis import videomodule
@@ -33,6 +33,14 @@ STATE_SOUND_PLAYING = 1
 STATE_WAITING_FOR_INPUT = 2
 STATE_FEEDBACK = 3
 
+# --- Sound parameters ---
+SAMPLING_RATE = 44100  # in Hz
+SOUND_DURATION = 0.5  # seconds
+SOUND_FREQUENCY = 440  # Hz (A4 note)
+SOUND_AMPLITUDE = 0.5 # Global amplitude for the sound wave
+SOUND_ID_LEFT = 1
+SOUND_ID_RIGHT = 2
+
 class Task(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -56,7 +64,7 @@ class Task(QMainWindow):
         self.initzone_radius_slider = widgets.SliderWidget(maxvalue=300, label="IZ radius", value=self.initzone[2])
         self.mask_radius_slider = widgets.SliderWidget(maxvalue=300, label="Mask radius", value=self.mask[2])
         self.status_label = widgets.StatusWidget()
-        self.session_control = widgets.SessionControlWidget()
+        self.session_control = SessionControlWidget()
         self.params = gui.Container()
         self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
         self.params['sessionDuration'] = gui.NumericParam('Duration', value=60, units='s',
@@ -82,9 +90,11 @@ class Task(QMainWindow):
         self.inside_initzone = False
 
         self.start_video_thread()
-        self.sound_player = soundmodule.SoundPlayer()
         self.frame_data = {'timestamp': [], 'centroid_x': [], 'centroid_y': []}  # To store frame data
         self.trial_data = []  # To store trial data for later analysis
+
+        self.sound_player = soundmodule.SoundPlayer()
+        self.prepare_sounds()
 
         self.feedback_timer = QTimer(self)
         self.feedback_timer.setSingleShot(True)
@@ -205,15 +215,22 @@ class Task(QMainWindow):
         self.current_state = STATE_MONITORING
         self.status_label.reset("Monitoring video feed...")
         
+    def prepare_sounds(self):
+        soundL = soundmodule.Sound(duration=SOUND_DURATION, srate=SAMPLING_RATE, nchannels=2)
+        soundL.add_tone(SOUND_FREQUENCY, SOUND_DURATION, channel=0)
+        soundR = soundmodule.Sound(duration=SOUND_DURATION, srate=SAMPLING_RATE, nchannels=2)
+        soundR.add_tone(SOUND_FREQUENCY, SOUND_DURATION, channel=1)
+        self.sound_player.set_sound(SOUND_ID_LEFT, soundL)
+        self.sound_player.set_sound(SOUND_ID_RIGHT, soundR)
+
     def play_random_sound(self):
         """Plays a sound to either the left or right speaker randomly."""
         channel_names = ['left', 'right']
-        self.correct_channel = str(np.random.choice(channel_names))
-        # NOTE: the code here is a little backwards. I should find the index first.
-        index_correct_channel = channel_names.index(self.correct_channel)
+        sound_ids = [SOUND_ID_LEFT, SOUND_ID_RIGHT]
+        index_correct_channel = np.random.randint(len(channel_names))
+        self.correct_channel = channel_names[index_correct_channel]
         print(f"Playing sound to: {self.correct_channel} channel")
-        #self.sound_player.play_noise()
-        self.sound_player.play_tone(index_correct_channel)
+        self.sound_player.play(sound_ids[index_correct_channel])
 
     def keyPressEvent(self, event):
         """Handles key press events for user input."""
@@ -252,6 +269,62 @@ class Task(QMainWindow):
         self.video_thread.stop()
         super().closeEvent(event)
 
+
+BUTTON_COLORS = {'start': 'limegreen', 'stop': 'red'}
+
+class SessionControlWidget(QWidget):
+    resume = pyqtSignal()
+    pause = pyqtSignal()
+    
+    def __init__(self):
+        super().__init__()
+        # -- Create a button --
+        self.button_start_stop = QPushButton('Text')
+        self.button_start_stop.setCheckable(False)
+        self.button_start_stop.setMinimumHeight(100)
+        # Get current font size
+        self.stylestr = ("QPushButton { font-weight: normal; padding: 10px; border-radius: 6px; "
+                        "color: black; border: none; }")
+        self.button_start_stop.setStyleSheet(self.stylestr.replace("}", "background-color: gray; }"))
+        button_font = self.button_start_stop.font()
+        button_font.setPointSize(button_font.pointSize()+10)
+        self.button_start_stop.setFont(button_font)
+        self.layout = QVBoxLayout(self)
+        self.layout.addWidget(self.button_start_stop)
+        # -- Connect signals --
+        self.running_state = False
+        self.button_start_stop.clicked.connect(self.startOrStop)
+        self.stop()
+        
+    def startOrStop(self):
+        """Toggle (start or stop) session running state."""
+        if(self.running_state):
+            self.stop()
+        else:
+            self.start()
+
+    def start(self):
+        """Resume session."""
+        # -- Change button appearance --
+        #stylestr = 'QWidget {{ background-color: {} }}'.format(BUTTON_COLORS['stop'])
+        #stylestr = self.stylestr + 'background-color: {}'.format(BUTTON_COLORS['stop'])
+        stylestr = self.stylestr.replace("}", "background-color: {}".format(BUTTON_COLORS['stop']) + " }")
+        self.button_start_stop.setStyleSheet(stylestr)
+        self.button_start_stop.setText('Stop')
+        self.resume.emit()
+        self.running_state = True
+
+    def stop(self):
+        """Pause session."""
+        # -- Change button appearance --
+        #stylestr = 'QWidget {{ background-color: {} }}'.format(BUTTON_COLORS['start'])
+        #stylestr = self.stylestr + ' background-color: {}'.format(BUTTON_COLORS['start'])
+        stylestr = self.stylestr.replace("}", "background-color: {}".format(BUTTON_COLORS['start']) + " }")
+        self.button_start_stop.setStyleSheet(stylestr)
+        self.button_start_stop.setText('Start')
+        self.pause.emit()
+        self.running_state = False
+    
 
 if __name__ == "__main__":
     (app,paradigm) = gui.create_app(Task)
