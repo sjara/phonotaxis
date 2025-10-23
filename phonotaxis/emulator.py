@@ -42,11 +42,11 @@ BUTTON_STYLE_NORMAL = """
         color: black;
     }
 """
-
+# #4CAF50 -green
 BUTTON_STYLE_ACTIVE = """
     QPushButton {
-        background-color: #4CAF50;
-        border: 2px solid #45a049;
+        background-color: #C4A000;
+        border: 2px solid #806000;
         border-radius: 8px;
         padding: 8px;
         font-size: 12px;
@@ -310,6 +310,10 @@ class EmulatorWidget(QtWidgets.QWidget):
         self._update_connection_status()
         self._reset_all_outputs()
             
+    def start(self):
+        """Start the emulator (placeholder for compatibility)."""
+        pass
+    
     def _on_input_pressed(self, input_name: str):
         """Handle input button press - sends 'in' event."""
         if not self.state_machine:
