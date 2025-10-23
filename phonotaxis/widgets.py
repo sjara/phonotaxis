@@ -20,64 +20,6 @@ class StatusWidget(QLabel):
                            "background-color: #333; color: #eee;")
 
 
-BUTTON_COLORS = {'start': 'limegreen', 'stop': 'red'}
-
-class SessionControlWidget(QWidget):
-    resume = pyqtSignal()
-    pause = pyqtSignal()
-    
-    def __init__(self):
-        super().__init__()
-        # -- Creat a button --
-        self.button_start_stop = QPushButton('Text')
-        self.button_start_stop.setCheckable(False)
-        self.button_start_stop.setMinimumHeight(100)
-        # Get current font size
-        self.stylestr = ("QPushButton { font-weight: normal; padding: 10px; border-radius: 6px; "
-                        "color: black; border: none; }")
-        self.button_start_stop.setStyleSheet(self.stylestr.replace("}", "background-color: gray; }"))
-        button_font = self.button_start_stop.font()
-        button_font.setPointSize(button_font.pointSize()+10)
-        self.button_start_stop.setFont(button_font)
-        self.layout = QVBoxLayout(self)
-        self.layout.addWidget(self.button_start_stop)
-        
-        # -- Connect signals --
-        self.running_state = False
-        self.button_start_stop.clicked.connect(self.startOrStop)
-        self.stop()
-        
-    def startOrStop(self):
-        """Toggle (start or stop) session running state."""
-        if(self.running_state):
-            self.stop()
-        else:
-            self.start()
-
-    def start(self):
-        """Resume session."""
-        # -- Change button appearance --
-        #stylestr = 'QWidget {{ background-color: {} }}'.format(BUTTON_COLORS['stop'])
-        #stylestr = self.stylestr + 'background-color: {}'.format(BUTTON_COLORS['stop'])
-        stylestr = self.stylestr.replace("}", "background-color: {}".format(BUTTON_COLORS['stop']) + " }")
-        self.button_start_stop.setStyleSheet(stylestr)
-        self.button_start_stop.setText('Stop')
-
-        self.resume.emit()
-        self.running_state = True
-
-    def stop(self):
-        """Pause session."""
-        # -- Change button appearance --
-        #stylestr = 'QWidget {{ background-color: {} }}'.format(BUTTON_COLORS['start'])
-        #stylestr = self.stylestr + ' background-color: {}'.format(BUTTON_COLORS['start'])
-        stylestr = self.stylestr.replace("}", "background-color: {}".format(BUTTON_COLORS['start']) + " }")
-        self.button_start_stop.setStyleSheet(stylestr)
-        self.button_start_stop.setText('Start')
-        self.pause.emit()
-        self.running_state = False
-    
-
 class CustomSlider(QSlider):
     """Custom QSlider that ignores arrow key events."""
     def keyPressEvent(self, event):
@@ -367,8 +309,8 @@ INPUT_INDICATOR_STYLE_BELOW = """
 
 INPUT_INDICATOR_STYLE_ABOVE = """
     QLabel {
-        background-color: #c4a000;
-        border: 1px solid #45a049;
+        background-color: #C4A000;
+        border: 1px solid #806000;
         border-radius: 4px;
         padding: 8px;
         font-size: 11px;
