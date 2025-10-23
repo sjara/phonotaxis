@@ -42,47 +42,78 @@ def apply_rise_fall(waveform, samplingRate, riseTime, fallTime):
 class SoundPlayer():
     def __init__(self):
         self.device = sd.default.device[1]  # Use default device
-        self.sounds = {}
+        self.sounds = {}  # Maps integer IDs to Sound objects
 
-    def set_sound(self, name, sound):
-        self.sounds[name] = sound
+    def set_sound(self, sound_id, sound):
+        """
+        Set a sound with an integer ID.
+        
+        Args:
+            sound_id (int): Integer ID for the sound (use 0 for no sound)
+            sound: Sound object to store
+        """
+        self.sounds[sound_id] = sound
 
-    def play(self, name):
-        sound = self.sounds[name]
-        sd.play(sound.wave, sound.srate, device=self.device)
+    def play(self, sound_id):
+        """
+        Play a sound by its integer ID.
+        
+        Args:
+            sound_id (int): Integer ID of the sound to play
+        """
+        if sound_id == 0:
+            return  # 0 means no sound
+        
+        if sound_id in self.sounds:
+            sound = self.sounds[sound_id]
+            sd.play(sound.wave, sound.srate, device=self.device)
+        else:
+            print(f"Warning: Sound ID {sound_id} not found")
 
-    def play_noise(self, max_channels=2):
-        tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
-        noise_wave = SOUND_AMPLITUDE * np.random.rand(len(tvec))
-        multichan_output = np.tile(noise_wave[:,np.newaxis], (1, max_channels)).astype(np.float32)
-        try:
-            sd.play(multichan_output, SAMPLERATE, device=self.device)
-        except Exception as e:
-            print(f"Sound playback error: {e}")
+    def connect_state_machine(self, state_machine):
+        """
+        Connect to a state machine's integerOutput signal.
+        
+        When the state machine emits an integerOutput signal, the corresponding
+        sound will be played automatically.
+        
+        Args:
+            state_machine: StateMachine instance with integerOutput signal
+        """
+        state_machine.integerOutput.connect(self.play)
+
+    # def play_noise(self, max_channels=2):
+    #     tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
+    #     noise_wave = SOUND_AMPLITUDE * np.random.rand(len(tvec))
+    #     multichan_output = np.tile(noise_wave[:,np.newaxis], (1, max_channels)).astype(np.float32)
+    #     try:
+    #         sd.play(multichan_output, SAMPLERATE, device=self.device)
+    #     except Exception as e:
+    #         print(f"Sound playback error: {e}")
         
         
-    def play_tone(self, channel=0, max_channels=2):
-        """
-        Channels:
-          0: left
-          1: right
-        """
-        # Generate a sine wave
-        tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
-        sine_wave = SOUND_AMPLITUDE * np.sin(2 * np.pi * SOUND_FREQUENCY * tvec)
+    # def play_tone(self, channel=0, max_channels=2):
+    #     """
+    #     Channels:
+    #       0: left
+    #       1: right
+    #     """
+    #     # Generate a sine wave
+    #     tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
+    #     sine_wave = SOUND_AMPLITUDE * np.sin(2 * np.pi * SOUND_FREQUENCY * tvec)
 
-        # Create multichan output
-        multichan_output = np.zeros((len(sine_wave), max_channels), dtype=np.float32)
-        multichan_output[:, channel] = sine_wave
+    #     # Create multichan output
+    #     multichan_output = np.zeros((len(sine_wave), max_channels), dtype=np.float32)
+    #     multichan_output[:, channel] = sine_wave
 
-        try:
-            sd.play(multichan_output, SAMPLERATE, device=self.device)
-            #sd.wait()  # Commented out as per user request to avoid slowing down video
-        except Exception as e:
-            #QMessageBox.warning(self, "Sound Error", f"Could not play sound: {e}\n"
-            #                    "Please ensure your audio output device is correctly configured.")
-            print(f"Sound playback error: {e}")
-            ##self.reset_to_monitoring() # Reset state if sound fails
+    #     try:
+    #         sd.play(multichan_output, SAMPLERATE, device=self.device)
+    #         #sd.wait()  # Commented out as per user request to avoid slowing down video
+    #     except Exception as e:
+    #         #QMessageBox.warning(self, "Sound Error", f"Could not play sound: {e}\n"
+    #         #                    "Please ensure your audio output device is correctly configured.")
+    #         print(f"Sound playback error: {e}")
+    #         ##self.reset_to_monitoring() # Reset state if sound fails
 
     
 class Sound():
@@ -266,8 +297,8 @@ if __name__ == '__main__':
     print(sound.components)
 
     splayer = SoundPlayer()
-    splayer.set_sound('mix3', sound)
-    splayer.play('mix3')
+    splayer.set_sound(1, sound)
+    splayer.play(1)
     
 
 
