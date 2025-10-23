@@ -25,23 +25,52 @@ class StateMachine(QtCore.QObject):
     - Matrix values indicate the next state for each event
     
     Signals:
-        stateChanged: Emitted when state changes (int newStateIndex)
-        outputChanged: Emitted when outputs change (int outputIndex, bool value)
-        stateTimerExpired: Internal signal for state timer expiration
-        
+        stateChanged(int): Emitted when state changes. Args: newStateIndex.
+        outputChanged(int, bool): Emitted when an output changes.
+        integerOutput(int): Emitted when entering a state with an integer output.
+        forceStateTransition(int): Signal to force a transition to stateIndex.
+        eventProcessed(int, float, int): eventIndex, timestamp, newState
+        stateTimerExpired(): Internal signal for state timer expiration (typically not used externally)
+    
+    Public Methods (to send events/control):
+        process_input(input_event: int): Process an input event.
+        connect_input_signal(signal: QtCore.pyqtSignal, input_event: int): Connect a PyQt
+            signal to an input event, so when the signal is emitted, the input event is
+            automatically processed
+        force_state(state_index: int): Force a transition to a specific state, bypassing
+            the state matrix. Use -1 to force transition to the last (END) state
+        force_output(output: int, value: bool): Force an output to a specific value,
+            bypassing normal state-based output control
+        start(): Start the state machine (begins in END state)
+        stop(): Stop the state machine
+    
+    Public Methods (to query state/events):
+        get_current_state() -> int: Returns the current state index
+        get_state_info() -> Dict: Returns comprehensive state machine information including
+            current_state, is_running, is_configured, num_states, num_inputs, num_outputs,
+            output_states, and state_timers
+        get_output_state(output: int) -> bool: Returns current state of a specific output
+        get_transitions_from_state(state: int) -> np.ndarray: Returns all possible next states
+            from a given state for each input event
+        get_transitions_for_input(input_event: int) -> np.ndarray: Returns next states for a
+            specific input across all states
+        find_states_with_output(output: int, value: bool) -> np.ndarray: Returns array of
+            state indices that have a specific output value
+    
     The state machine can handle:
-    - Input events (from external PyQt signals)
+    - Input events (from external PyQt signals via connect_input_signal())
     - State timers (automatic transitions after timeout)
     - State outputs (signals emitted when entering states)
+    - Forced state transitions (via force_state() or forceStateTransition signal)
     """
     
     # Signals
     stateChanged = QtCore.pyqtSignal(int)  # newStateIndex
     outputChanged = QtCore.pyqtSignal(int, bool)  # outputIndex, value
-    integerOutput = QtCore.pyqtSignal(int)
-    stateTimerExpired = QtCore.pyqtSignal()
+    integerOutput = QtCore.pyqtSignal(int)   # integer output value
     forceStateTransition = QtCore.pyqtSignal(int)  # stateIndex - for external forced transitions
     eventProcessed = QtCore.pyqtSignal(int, float, int)  # eventIndex, timestamp, newState
+    _stateTimerExpired = QtCore.pyqtSignal()  # stateTimer expiration internal signal
     
     def __init__(self):
         """
@@ -71,8 +100,8 @@ class StateMachine(QtCore.QObject):
         # Timer for state timeouts
         self.state_timer = QtCore.QTimer()
         self.state_timer.setSingleShot(True)
-        self.state_timer.timeout.connect(self.stateTimerExpired.emit)
-        self.stateTimerExpired.connect(self._on_state_timer_expired)
+        self.state_timer.timeout.connect(self._stateTimerExpired.emit)
+        self._stateTimerExpired.connect(self._on_state_timer_expired)
         
         # Connect force state transition signal
         self.forceStateTransition.connect(self._on_force_state_transition)
