@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, QTimer
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.ticker import MultipleLocator
 from phonotaxis.arduinomodule import ArduinoThread
 from phonotaxis import gui
 #from phonotaxis import config
@@ -104,19 +105,37 @@ class ArduinoTestWindow(QMainWindow):
         self.threshold_label = QLabel("Event: None")
         left_layout.addWidget(self.threshold_label)
         
-        # Control buttons
-        self.start_button = QPushButton("Start Monitoring")
-        self.start_button.clicked.connect(self.start_monitoring)
-        left_layout.addWidget(self.start_button)
-        
-        self.stop_button = QPushButton("Stop Monitoring")
-        self.stop_button.clicked.connect(self.stop_monitoring)
-        self.stop_button.setEnabled(False)
-        left_layout.addWidget(self.stop_button)
+        # Control button (toggle between start and stop)
+        self.monitoring_button = QPushButton("Start Monitoring")
+        self.monitoring_button.setCheckable(True)
+        self.monitoring_button.clicked.connect(self.toggle_monitoring)
+        self.monitoring_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2E7D32;
+                color: white;
+                font-weight: bold;
+                padding: 8px;
+            }
+            QPushButton:checked {
+                background-color: #f44336;
+            }
+            QPushButton:hover {
+                background-color: #1B5E20;
+            }
+            QPushButton:checked:hover {
+                background-color: #da190b;
+            }
+        """)
+        left_layout.addWidget(self.monitoring_button)
         
         # Clear plot button
         self.clear_button = QPushButton("Clear Plots")
         self.clear_button.clicked.connect(self.clear_plots)
+        self.clear_button.setStyleSheet("""
+            QPushButton {
+                padding: 8px;
+            }
+        """)
         left_layout.addWidget(self.clear_button)
         
         # Vertical slider for threshold control (for pin 0)
@@ -209,6 +228,9 @@ class ArduinoTestWindow(QMainWindow):
             ax.set_ylabel(f'A{i} Value')
             ax.set_ylim(-0.05, 1.05)
             ax.grid(True, alpha=0.3)
+            
+            # Set x-axis to show ticks at 1-second intervals
+            ax.xaxis.set_major_locator(MultipleLocator(0.5))
             #ax.legend(loc='upper right')
             
             # Initialize data buffer for this pin
@@ -296,26 +318,23 @@ class ArduinoTestWindow(QMainWindow):
         # Redraw canvas
         self.canvas.draw()
     
-    def start_monitoring(self):
-        """Start Arduino monitoring and plotting."""
-        if self.arduino_thread:
-            #self.arduino_thread.start()
-            self.plot_timer.start()
-            self.start_time = None  # Will be set with first data point
-            self.status_label.setText("Arduino Status: Monitoring...")
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
+    def toggle_monitoring(self):
+        """Toggle Arduino monitoring and plotting."""
+        if self.monitoring_button.isChecked():
+            # Start monitoring
+            if self.arduino_thread:
+                self.clear_plots()
+                self.plot_timer.start()
+                self.start_time = None  # Will be set with first data point
+                self.status_label.setText("Arduino Status: Monitoring...")
+                self.monitoring_button.setText("Stop Monitoring")
+        else:
+            # Stop monitoring
+            if self.arduino_thread and self.arduino_thread.isRunning():
+                self.plot_timer.stop()
+                self.status_label.setText("Arduino Status: Stopped")
+                self.monitoring_button.setText("Start Monitoring")
     
-    def stop_monitoring(self):
-        """Stop Arduino monitoring and plotting."""
-        if self.arduino_thread and self.arduino_thread.isRunning():
-            #self.arduino_thread.stop()
-            #self.arduino_thread.wait()  # Wait for thread to finish
-            self.plot_timer.stop()
-            self.status_label.setText("Arduino Status: Stopped")
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
-
     def on_arduino_ready(self):
         """Handle Arduino ready signals."""
         self.status_label.setText('Arduino Status: <b>Ready</b>')
@@ -323,8 +342,8 @@ class ArduinoTestWindow(QMainWindow):
     def on_arduino_error(self, error_message):
         """Handle Arduino error signals."""
         self.status_label.setText(f"Arduino Error: {error_message}")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.monitoring_button.setChecked(False)
+        self.monitoring_button.setText("Start Monitoring")
     
     def on_threshold_crossed(self, pin_number, value, is_rising_edge):
         """Handle threshold crossing signals if plot timer is active"""
@@ -336,24 +355,15 @@ class ArduinoTestWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event."""
-        self.stop_monitoring()
+        if self.monitoring_button.isChecked():
+            self.monitoring_button.setChecked(False)
+            self.toggle_monitoring()
         self.arduino_thread.stop()
         if self.plot_timer.isActive():
             self.plot_timer.stop()
         event.accept()
 
 
-def main():
-    """Main function to run the test application."""
-    app = QApplication(sys.argv)
-    
-    # Create and show the test window
-    window = ArduinoTestWindow()
-    window.show()
-    
-    # Run the application
-    sys.exit(app.exec())
-
-
 if __name__ == "__main__":
-    main()
+    (app, paradigm) = gui.create_app(ArduinoTestWindow)
+
