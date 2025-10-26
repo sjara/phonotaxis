@@ -7,7 +7,7 @@ import os
 import sounddevice as sd
 import random
 import numpy as np
-#import scipy.io.wavfile
+import scipy.io.wavfile
 
 # Temporary parameters
 SOUND_DURATION = 0.5  # seconds
@@ -43,6 +43,7 @@ class SoundPlayer():
     def __init__(self):
         self.device = sd.default.device[1]  # Use default device
         self.sounds = {}  # Maps integer IDs to Sound objects
+        self.active_streams = {}  # Maps sound_id to active OutputStream objects
 
     def set_sound(self, sound_id, sound):
         """
@@ -56,7 +57,10 @@ class SoundPlayer():
 
     def play(self, sound_id):
         """
-        Play a sound by its integer ID.
+        Play a sound by its integer ID (non-blocking, simple method).
+        
+        Note: This method doesn't allow stopping individual sounds.
+        Use play_stream() if you need that capability.
         
         Args:
             sound_id (int): Integer ID of the sound to play
@@ -70,6 +74,108 @@ class SoundPlayer():
         else:
             print(f"Warning: Sound ID {sound_id} not found")
 
+    def play_stream(self, sound_id):
+        """
+        Play a sound by its integer ID using a stream (allows stopping individual sounds).
+        
+        IMPLELEMENTATION IN PROGRESS
+
+        This method uses a callback-based stream approach that allows for
+        individual control of each playing sound via the stop() method.
+        
+        Args:
+            sound_id (int): Integer ID of the sound to play
+        """
+        if sound_id == 0:
+            return  # 0 means no sound
+        
+        if sound_id in self.sounds:
+            sound = self.sounds[sound_id]
+            
+            # Prepare the waveform data
+            wave_data = sound.wave.astype(np.float32)
+            
+            # Create a closure to keep track of playback position
+            position = [0]  # Use list to allow modification in nested function
+            
+            def callback(outdata, frames, time_info, status):
+                """Callback function to feed audio data to the stream."""
+                if status:
+                    print(f"Stream status: {status}")
+                
+                chunksize = min(len(wave_data) - position[0], frames)
+                outdata[:chunksize] = wave_data[position[0]:position[0] + chunksize]
+                
+                if chunksize < frames:
+                    outdata[chunksize:] = 0  # Fill remaining with silence
+                    raise sd.CallbackStop()  # Stop the stream when done
+                
+                position[0] += chunksize
+            
+            # Create an OutputStream with callback for non-blocking playback
+            stream = sd.OutputStream(
+                samplerate=sound.srate,
+                channels=sound.nchannels,
+                device=self.device,
+                callback=callback,
+                finished_callback=lambda: self._cleanup_stream(sound_id)
+            )
+            
+            # Store the stream for later control (stopping, etc.)
+            self.active_streams[sound_id] = stream
+            
+            # Start the stream (non-blocking)
+            stream.start()
+        else:
+            print(f"Warning: Sound ID {sound_id} not found")
+
+    def _cleanup_stream(self, sound_id):
+        """Internal method to clean up a stream after it finishes playing."""
+        if sound_id in self.active_streams:
+            try:
+                stream = self.active_streams[sound_id]
+                stream.close()
+                del self.active_streams[sound_id]
+            except:
+                pass  # Stream might already be closed
+
+    def stop(self):
+        """
+        Stop sounds started with play() method.
+        
+        Note: Since sd.play() doesn't provide individual sound control, this stops ALL
+        sounds started with play().
+        """
+        sd.stop()
+
+    def stop_stream(self, sound_id=None):
+        """
+        Stop stream-based sounds started with play_stream() by their integer ID,
+        or stop all streams if no ID is given.
+        
+        Args:
+            sound_id (int, optional): Integer ID of the stream to stop. If None, stops all streams.
+        """
+        if sound_id is None:
+            # Stop all streams
+            sound_ids = list(self.active_streams.keys())  # Copy keys to avoid modification during iteration
+            for sid in sound_ids:
+                stream = self.active_streams[sid]
+                stream.stop()
+                stream.close()
+                del self.active_streams[sid]
+        elif sound_id in self.active_streams:
+            stream = self.active_streams[sound_id]
+            stream.stop()
+            stream.close()
+            del self.active_streams[sound_id]
+        else:
+            print(f"Warning: No active stream with ID {sound_id} to stop")
+
+    def wait_until_done(self):
+        """Wait until the current sound is done playing."""
+        sd.wait()
+
     def connect_state_machine(self, state_machine):
         """
         Connect to a state machine's integerOutput signal.
@@ -82,38 +188,21 @@ class SoundPlayer():
         """
         state_machine.integerOutput.connect(self.play)
 
-    # def play_noise(self, max_channels=2):
-    #     tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
-    #     noise_wave = SOUND_AMPLITUDE * np.random.rand(len(tvec))
-    #     multichan_output = np.tile(noise_wave[:,np.newaxis], (1, max_channels)).astype(np.float32)
-    #     try:
-    #         sd.play(multichan_output, SAMPLERATE, device=self.device)
-    #     except Exception as e:
-    #         print(f"Sound playback error: {e}")
+    def close(self):
+        """
+        Close the sound player and clean up all resources.
         
+        Stops all currently playing sounds (both play() and play_stream()) and clears the sound library.
+        Call this when you're done using the SoundPlayer to ensure proper cleanup.
+        """
+        # Stop all sounds started with play()
+        self.stop()
         
-    # def play_tone(self, channel=0, max_channels=2):
-    #     """
-    #     Channels:
-    #       0: left
-    #       1: right
-    #     """
-    #     # Generate a sine wave
-    #     tvec = np.linspace(0, SOUND_DURATION, int(SAMPLERATE * SOUND_DURATION), False)
-    #     sine_wave = SOUND_AMPLITUDE * np.sin(2 * np.pi * SOUND_FREQUENCY * tvec)
-
-    #     # Create multichan output
-    #     multichan_output = np.zeros((len(sine_wave), max_channels), dtype=np.float32)
-    #     multichan_output[:, channel] = sine_wave
-
-    #     try:
-    #         sd.play(multichan_output, SAMPLERATE, device=self.device)
-    #         #sd.wait()  # Commented out as per user request to avoid slowing down video
-    #     except Exception as e:
-    #         #QMessageBox.warning(self, "Sound Error", f"Could not play sound: {e}\n"
-    #         #                    "Please ensure your audio output device is correctly configured.")
-    #         print(f"Sound playback error: {e}")
-    #         ##self.reset_to_monitoring() # Reset state if sound fails
+        # Stop all active streams started with play_stream()
+        self.stop_stream()
+        
+        # Clear the sounds dictionary
+        self.sounds.clear()
 
     
 class Sound():
@@ -213,9 +302,65 @@ class Sound():
     
     def add_from_file(self, soundfile, amp=1, channel='all', loop=False):
         """
-        Add a sound from a file to sound waveform
+        Add a sound from a file to sound waveform.
+        
+        Args:
+            soundfile (str): Path to the WAV file to load.
+            amp (float): Amplitude scaling factor (default is 1).
+            channel (int/str): Either a channel index or 'all'.
+            loop (bool): If True, loop the sound to fill the duration (default is False).
+            
+        Raises:
+            ValueError: If the sampling rate of the file doesn't match the object's sampling rate.
+            FileNotFoundError: If the soundfile doesn't exist.
+            
+        Returns:
+            tuple: Time vector and the updated sound waveform.
         """
-        pass
+        # Load the WAV file
+        if not os.path.exists(soundfile):
+            raise FileNotFoundError(f"Sound file not found: {soundfile}")
+        
+        file_srate, file_wave = scipy.io.wavfile.read(soundfile)
+        
+        # Check if sampling rate matches
+        if file_srate != self.srate:
+            raise ValueError(f"Sampling rate mismatch: file has {file_srate} Hz, "
+                           f"but Sound object is set to {self.srate} Hz. "
+                           f"Resampling is not yet implemented.")
+        
+        # Convert to float and normalize if necessary
+        if file_wave.dtype == np.int16:
+            file_wave = file_wave.astype(np.float64) / 32767.0
+        elif file_wave.dtype == np.int32:
+            file_wave = file_wave.astype(np.float64) / 2147483647.0
+        elif file_wave.dtype != np.float32 and file_wave.dtype != np.float64:
+            file_wave = file_wave.astype(np.float64)
+        
+        # Handle mono vs stereo files
+        if file_wave.ndim == 1:
+            # Mono file
+            file_wave = file_wave[:, np.newaxis]
+        
+        # Handle looping if requested
+        if loop:
+            n_samples_needed = len(self.tvec)
+            n_samples_file = len(file_wave)
+            if n_samples_file < n_samples_needed:
+                n_repeats = int(np.ceil(n_samples_needed / n_samples_file))
+                file_wave = np.tile(file_wave, (n_repeats, 1))
+        
+        # Trim or pad to match the duration
+        n_samples = min(len(file_wave), len(self.tvec))
+        wave = np.zeros(len(self.tvec))
+        
+        # Use the first channel of the file if it's multichannel
+        wave[:n_samples] = amp * file_wave[:n_samples, 0]
+        
+        self.add_wave(wave, channel)
+        self.components += [{'type': 'file', 'soundfile': soundfile, 'amp': amp,
+                            'channel': channel, 'loop': loop}]
+        return self.tvec, self.wave
 
 
     def apply_rise_fall(self, riseTime=0.002, fallTime=0.002):
