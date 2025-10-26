@@ -113,6 +113,7 @@ class EmulatorWidget(QtWidgets.QWidget):
     def __init__(self, 
                  inputs: List[str],
                  outputs: List[str],
+                 event_offset: int = 0,
                  parent: Optional[QtWidgets.QWidget] = None):
         """
         Initialize the emulator widget.
@@ -120,6 +121,9 @@ class EmulatorWidget(QtWidgets.QWidget):
         Args:
             inputs: List of input names (e.g., ['center', 'left', 'right'])
             outputs: List of output names (e.g., ['valve', 'led'])
+            event_offset: Starting index for event numbering (default 0).
+                         Use this when combining with other input sources to avoid
+                         event index collisions.
             parent: Parent widget
         """
         super().__init__(parent)
@@ -130,7 +134,7 @@ class EmulatorWidget(QtWidgets.QWidget):
         
         # Create event mapping: each input gets 'in' and 'out' events
         self.events = {}
-        event_index = 0
+        event_index = event_offset  # Start from the provided offset
         for input_name in self.input_names:
             self.events[input_name + 'in'] = event_index
             event_index += 1

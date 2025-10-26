@@ -315,6 +315,7 @@ class ArduinoInterface(QThread):
                  port: Optional[str] = None,
                  thresholds: Optional[Dict[str, float]] = None,
                  sampling_interval: Optional[int] = None,
+                 event_offset: int = 0,
                  debug: bool = False,
                  parent: Optional[QThread] = None):
         """
@@ -327,6 +328,9 @@ class ArduinoInterface(QThread):
             thresholds: Dict mapping input names to threshold values (0.0-1.0)
                        If None, uses default threshold of 0.5 for all inputs
             sampling_interval: Arduino sampling interval in ms (None uses config)
+            event_offset: Starting index for event numbering (default 0).
+                         Use this when combining with other input sources to avoid
+                         event index collisions.
             debug: Enable debug output
             parent: Parent QObject
         """
@@ -341,7 +345,7 @@ class ArduinoInterface(QThread):
         
         # Create event mapping: each input gets 'in' and 'out' events
         self.events = {}
-        event_index = 0
+        event_index = event_offset  # Start from the provided offset
         for input_name in self.input_names:
             self.events[input_name + 'in'] = event_index
             event_index += 1
