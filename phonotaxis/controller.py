@@ -33,9 +33,6 @@ BUTTON_COLORS = {
     'stop': '#FF4444'    # Red
 }
 
-N_INPUTS = 3
-N_OUTPUTS = 2
-
 class SessionController(QtCore.QObject):
     """
     Controller for behavioral session management.
@@ -46,6 +43,13 @@ class SessionController(QtCore.QObject):
     
     This combines what was previously split between SessionModel and SessionController
     into a single, simpler class that's easier to understand and debug.
+    
+    Args:
+        parent: Parent QObject
+        polling_interval: Status update interval (seconds)
+        create_gui: Whether to create GUI
+        session_duration: Maximum session duration in seconds (None for unlimited)
+        debug: Enable debug output for state machine event processing (default False)
     
     Signals:
         status_update: Emitted when session status changes
@@ -69,7 +73,8 @@ class SessionController(QtCore.QObject):
                  parent: Optional[QtCore.QObject] = None,
                  polling_interval: float = DEFAULT_POLLING_INTERVAL,
                  create_gui: bool = True,
-                 session_duration: Optional[float] = None) -> None:
+                 session_duration: Optional[float] = None,
+                 debug: bool = False) -> None:
         """
         Initialize the session controller.
         
@@ -78,15 +83,17 @@ class SessionController(QtCore.QObject):
             polling_interval: Status update interval (seconds)
             create_gui: Whether to create GUI
             session_duration: Maximum session duration in seconds (None for unlimited)
+            debug: Enable debug output for state machine (default False)
         """
         super().__init__(parent)
         
         # Configuration
         self.polling_interval = polling_interval
         self.session_duration = session_duration
+        self.debug = debug
         
         # Trial structure
-        self.prepare_next_trial_states: List[int] = [] # [DEFAULT_PREPARE_NEXT_STATE]
+        self.prepare_next_trial_states: List[int] = []
         self.preparing_next_trial = False
         
         # Session state
@@ -106,7 +113,7 @@ class SessionController(QtCore.QObject):
         self.trials: List[int] = []
         
         # State machine
-        self.state_machine = StateMachine()
+        self.state_machine = StateMachine(debug=self.debug)
         self.state_matrix = StateMatrix(inputs=[], outputs=[])
         self.set_state_matrix(self.state_matrix)
         
@@ -202,7 +209,8 @@ class SessionController(QtCore.QObject):
             self.timer_tick.stop()
             
             # Stop state machine
-            self.state_machine.force_state(0)  # END state (always state 0)
+            end_state_index = self.state_matrix.get_end_state_index()
+            self.state_machine.force_state(end_state_index)
             self.state_machine.stop()
             
             # Update session state
