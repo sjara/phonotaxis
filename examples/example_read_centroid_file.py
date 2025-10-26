@@ -28,7 +28,7 @@ colors = mpl.cm.Blues(mplcolors.Normalize()(range(num_points)))
 
 # Plot line segments with color gradient
 plt.sca(ax1)
-if 0:
+if 1:
     for i in range(num_points - 1):
         plt.plot(dframe['centroid_x'].iloc[i:i+2],dframe['centroid_y'].iloc[i:i+2],
             color=colors[i],linewidth=1, zorder=0)

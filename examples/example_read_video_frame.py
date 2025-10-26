@@ -6,8 +6,6 @@ from phonotaxis import config
 import cv2
 import os
 
-#RESOLUTION = (640, 480)  # Assuming a resolution of 640x480 for the video
-
 subject = 'test000'
 video_filepath = os.path.join(config.VIDEO_PATH, subject, f"{subject}_output.mp4")
 
