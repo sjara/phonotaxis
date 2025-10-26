@@ -7,8 +7,9 @@ import os
 import time
 import cv2
 import numpy as np
+from typing import Dict, List, Optional, Tuple
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QObject
 
 # --- Configuration ---
 #FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
@@ -29,7 +30,7 @@ class VideoThread(QThread):
     """
     #new_frame_signal = pyqtSignal(np.ndarray)
     camera_error_signal = pyqtSignal(str)
-    frame_processed = pyqtSignal(float, np.ndarray, tuple) # Emits frame and object centroid (x,y)
+    frame_processed = pyqtSignal(float, np.ndarray, tuple, object) # Emits timestamp, frame, points, and contour
 
     def __init__(self, camera_index=0, mode='grayscale', tracking=False, debug=False):
         """
@@ -282,13 +283,13 @@ class VideoThread(QThread):
                 gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
                 # Process video (tracking, detection, etc)
-                processed_frame, points = self.process_frame(gray_frame)
+                processed_frame, points, contour = self.process_frame(gray_frame)
 
                 # Store tracking data if recording
                 self.store_tracking_data(timestamp, points)
 
                 # Emit signal with the new frame (e.g., to show video in GUI)
-                self.frame_processed.emit(timestamp, processed_frame, points)
+                self.frame_processed.emit(timestamp, processed_frame, points, contour)
                 #self.new_frame_signal.emit(gray_frame)
             else:
                 # If frame reading fails, emit an error and stop
@@ -408,9 +409,15 @@ class VideoThread(QThread):
         """
         Here is where you will perform tracking and detection of elements in video.
         You want this function to be fast, so avoid heavy processing here.
+        
+        Returns:
+            tuple: (processed_frame, points, contour) where:
+                - processed_frame: The frame to display
+                - points: Tuple of tracked points (centroid,)
+                - contour: The largest contour found, None if no contours detected
         """
         if not self.tracking:
-            return (frame, ())
+            return (frame, (), None)
         
         # Apply MASK masking if enabled
         masked_frame = self.apply_mask(frame)
@@ -432,6 +439,7 @@ class VideoThread(QThread):
                 if area > largest_area:
                     largest_area = area
                     largest_contour = cnt
+            # Only compute centroid if contour meets minarea threshold
             if largest_contour is not None and largest_area > self.minarea:
                 mom = cv2.moments(largest_contour)
                 if mom["m00"] != 0:
@@ -446,12 +454,305 @@ class VideoThread(QThread):
             processed_frame = cv2.bitwise_not(binary_frame)
         if self.debug:
             print(f"Centroid: {centroid} \t Largest area: {largest_area}")
-        return (processed_frame, points)
+        return (processed_frame, points, largest_contour)
         
     def stop(self):
         """Stops the video capture thread gracefully."""
         self._run_flag = False
         self.wait()
+
+
+class VideoInterface(QObject):
+    """
+    Interface between video events and state machine.
+    
+    This class manages the connection between video-based events (e.g., ROI entry/exit,
+    zone crossings) and state machine events, providing:
+    
+    - Event mapping: translates video detections to state machine events
+    - Zone monitoring: tracks when tracked objects enter/exit defined zones
+    - Named access: uses human-readable names for zones
+    - Flexible configuration: supports multiple zones with different shapes
+    
+    The interface creates a consistent event structure:
+    - Input events: '{zone_name}in' (object entered zone)
+                   '{zone_name}out' (object exited zone)
+    
+    Zone types supported:
+    - Circular zones: defined by (center_x, center_y, radius)
+    - Rectangular zones: defined by (x1, y1, x2, y2) or center + dimensions
+    
+    Usage:
+        interface = VideoInterface(
+            video_thread=video_thread,
+            zones={'init_zone': ('circular', (320, 240, 40))}
+        )
+        interface.connect_state_machine(state_machine)
+        video_thread.frame_processed.connect(interface.on_frame_processed)
+    
+    The interface monitors the video thread's frame_processed signal and generates
+    state machine events when tracked objects cross zone boundaries.
+    """
+    
+    def __init__(self,
+                 video_thread: VideoThread,
+                 zones: Optional[Dict[str, Tuple[str, tuple]]] = None,
+                 event_offset: int = 0,
+                 debug: bool = False,
+                 parent: Optional[QObject] = None):
+        """
+        Initialize the video interface.
+        
+        Args:
+            video_thread: VideoThread instance to monitor for video events
+            zones: Dictionary mapping zone names to zone specifications.
+                  Each zone is specified as: (zone_type, coordinates)
+                  - For circular zones: ('circular', (center_x, center_y, radius))
+                  - For rectangular zones: ('rectangular', (x1, y1, x2, y2))
+                  Example: {'init_zone': ('circular', (320, 240, 40)),
+                           'left_port': ('rectangular', (100, 100, 200, 300))}
+            event_offset: Starting index for event numbering (default 0).
+                         Use this when combining with other input sources to avoid
+                         event index collisions.
+            debug: Enable debug output
+            parent: Parent QObject
+        """
+        super().__init__(parent)
+        
+        self.video_thread = video_thread
+        self.debug = debug
+        
+        # Initialize zones and tracking state
+        self.zones = {}
+        self.previous_zone_states = {}  # Initialize before adding zones
+        
+        # State machine reference
+        self.state_machine = None
+        self.event_mapping: Dict[str, int] = {}
+        
+        # Add zones if provided
+        if zones is not None:
+            for zone_name, (zone_type, coords) in zones.items():
+                self.add_zone(zone_name, zone_type, coords)
+        
+        # Create event mapping: each zone gets 'in' and 'out' events
+        self.events = {}
+        event_index = event_offset  # Start from the provided offset
+        for zone_name in self.zones.keys():
+            self.events[f'{zone_name}in'] = event_index
+            event_index += 1
+            self.events[f'{zone_name}out'] = event_index
+            event_index += 1
+        
+        # Connect to video thread's frame_processed signal
+        if self.video_thread is not None:
+            self.video_thread.frame_processed.connect(self.on_frame_processed)
+            
+        if self.debug:
+            print(f"VideoInterface initialized with {len(self.zones)} zones")
+            print(f"Events: {self.events}")
+    
+    def add_zone(self, zone_name: str, zone_type: str, coords: tuple):
+        """
+        Add a zone for monitoring.
+        
+        Args:
+            zone_name: Name of the zone (e.g., 'init_zone', 'left_port')
+            zone_type: Type of zone ('circular' or 'rectangular')
+            coords: Coordinates defining the zone
+                   - For circular: (center_x, center_y, radius)
+                   - For rectangular: (x1, y1, x2, y2)
+        
+        Raises:
+            ValueError: If zone_type is invalid or coordinates are malformed
+        """
+        if zone_type not in ['circular', 'rectangular']:
+            raise ValueError(f"Invalid zone type '{zone_type}'. Must be 'circular' or 'rectangular'")
+        
+        if zone_type == 'circular':
+            if len(coords) != 3:
+                raise ValueError(f"Circular zone requires 3 coordinates (center_x, center_y, radius), got {len(coords)}")
+        elif zone_type == 'rectangular':
+            if len(coords) != 4:
+                raise ValueError(f"Rectangular zone requires 4 coordinates (x1, y1, x2, y2), got {len(coords)}")
+        
+        self.zones[zone_name] = {
+            'type': zone_type,
+            'coords': coords
+        }
+        
+        # Initialize previous state
+        if zone_name not in self.previous_zone_states:
+            self.previous_zone_states[zone_name] = False
+        
+        if self.debug:
+            print(f"Added {zone_type} zone '{zone_name}' with coords {coords}")
+    
+    def remove_zone(self, zone_name: str):
+        """
+        Remove a zone from monitoring.
+        
+        Args:
+            zone_name: Name of the zone to remove
+        """
+        if zone_name in self.zones:
+            del self.zones[zone_name]
+            del self.previous_zone_states[zone_name]
+            if self.debug:
+                print(f"Removed zone '{zone_name}'")
+    
+    def get_events(self) -> Dict[str, int]:
+        """
+        Get the event mapping created by this interface.
+        
+        Returns:
+            Dictionary mapping event names to sequential indices.
+            Each zone creates two events: '{zone}in' and '{zone}out'.
+        """
+        return self.events.copy()
+    
+    def connect_state_machine(self, state_machine):
+        """
+        Connect the interface to a state machine.
+        
+        This establishes bidirectional communication where video zone crossings
+        trigger state machine events.
+        
+        Args:
+            state_machine: StateMachine instance to connect to
+        """
+        self.state_machine = state_machine
+        self.event_mapping = self.get_events()
+        
+        if self.debug:
+            print(f"Connected to state machine with {len(self.event_mapping)} events")
+    
+    def disconnect_state_machine(self):
+        """Disconnect from the current state machine."""
+        self.state_machine = None
+        self.event_mapping.clear()
+        
+        if self.debug:
+            print("Disconnected from state machine")
+    
+    def point_in_zone(self, point: Tuple[int, int], zone_name: str) -> bool:
+        """
+        Check if a point is inside a zone.
+        
+        Args:
+            point: (x, y) coordinates of the point
+            zone_name: Name of the zone to check
+        
+        Returns:
+            True if point is inside the zone, False otherwise
+        """
+        if zone_name not in self.zones:
+            return False
+        
+        zone = self.zones[zone_name]
+        x, y = point
+        
+        # Handle invalid points (from tracking failures)
+        if x < 0 or y < 0:
+            return False
+        
+        if zone['type'] == 'circular':
+            center_x, center_y, radius = zone['coords']
+            distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+            return distance <= radius
+        
+        elif zone['type'] == 'rectangular':
+            x1, y1, x2, y2 = zone['coords']
+            return x1 <= x <= x2 and y1 <= y <= y2
+        
+        return False
+    
+    def on_frame_processed(self, timestamp: float, frame: np.ndarray, points: Tuple):
+        """
+        Handle frame processed signal from video thread.
+        
+        This is the main callback that checks for zone crossings and generates
+        state machine events. Called automatically when connected to video thread.
+        
+        Args:
+            timestamp: Frame timestamp
+            frame: Processed video frame (not used, but kept for signal compatibility)
+            points: Tuple of tracked points, typically (centroid,)
+        
+        Note that the signal may have additional parameters not used here.
+        """
+        if not self.state_machine or not self.state_machine.is_running:
+            return
+        
+        # Only process if we have valid tracking data
+        if not points or len(points) == 0:
+            return
+        
+        # Get the first tracked point (typically the centroid)
+        tracked_point = points[0]
+        
+        # Check each zone for entry/exit
+        for zone_name in self.zones.keys():
+            is_in_zone = self.point_in_zone(tracked_point, zone_name)
+            was_in_zone = self.previous_zone_states[zone_name]
+            
+            # Detect rising edge (entered zone)
+            if is_in_zone and not was_in_zone:
+                event_name = f'{zone_name}in'
+                if event_name in self.event_mapping:
+                    event_index = self.event_mapping[event_name]
+                    if self.debug:
+                        print(f"Zone entry detected: {zone_name} at {tracked_point}, triggering event {event_index}")
+                    self.state_machine.process_input(event_index)
+            
+            # Detect falling edge (exited zone)
+            elif not is_in_zone and was_in_zone:
+                event_name = f'{zone_name}out'
+                if event_name in self.event_mapping:
+                    event_index = self.event_mapping[event_name]
+                    if self.debug:
+                        print(f"Zone exit detected: {zone_name} at {tracked_point}, triggering event {event_index}")
+                    self.state_machine.process_input(event_index)
+            
+            # Update previous state
+            self.previous_zone_states[zone_name] = is_in_zone
+    
+    def get_zone_info(self, zone_name: str) -> Optional[Dict]:
+        """
+        Get information about a specific zone.
+        
+        Args:
+            zone_name: Name of the zone
+        
+        Returns:
+            Dictionary with zone information or None if zone doesn't exist
+        """
+        return self.zones.get(zone_name)
+    
+    def get_all_zones(self) -> Dict[str, Dict]:
+        """
+        Get information about all zones.
+        
+        Returns:
+            Dictionary mapping zone names to zone information
+        """
+        return self.zones.copy()
+    
+    def is_point_in_any_zone(self, point: Tuple[int, int]) -> List[str]:
+        """
+        Check which zones contain a given point.
+        
+        Args:
+            point: (x, y) coordinates to check
+        
+        Returns:
+            List of zone names that contain the point
+        """
+        zones_containing_point = []
+        for zone_name in self.zones.keys():
+            if self.point_in_zone(point, zone_name):
+                zones_containing_point.append(zone_name)
+        return zones_containing_point
 
 
 # -- For testing purposes --
@@ -471,7 +772,7 @@ class VideoThreadBlackDetect(VideoThread):
         avg_intensity = np.mean(frame)
         if avg_intensity < self.black_threshold:
             self.black_screen_detected_signal.emit()
-        return (frame, ())  # Return the frame and an empty tuple for points of interest
+        return (frame, (), None)  # Return the frame, empty points tuple, and no contour
 
 
 def count_video_frames(video_path):

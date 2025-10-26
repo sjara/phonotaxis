@@ -2,11 +2,13 @@
 Useful widgets for phonotaxis applications
 """
 
+# import cv2
+# import numpy as np
 from typing import Dict, Optional
 from PyQt6.QtWidgets import QLabel, QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QSlider
 from PyQt6.QtWidgets import QGroupBox, QGridLayout, QDoubleSpinBox
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPointF
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QPolygonF
 
 class StatusWidget(QLabel):
     def __init__(self):
@@ -85,6 +87,7 @@ class SliderWidget(QWidget):
 
 IZ_COLOR = (52, 101, 164)  # RGB for Tango Sky Blue
 CENTROID_COLOR = (239, 41, 41)  # RGB for Tango Scarlet Red
+CONTOUR_COLOR = (138, 226, 52)  # RGB for Tango Chameleon green
 
 class VideoWidget(QWidget):
     def __init__(self):
@@ -102,8 +105,11 @@ class VideoWidget(QWidget):
         # Store first point trail (list of (x, y) tuples)
         self.first_point_trail = []
         self.max_trail_length = 20
+        
+        # Contour display settings
+        self.show_contours = False  # Whether to display contours
 
-    def display_frame(self, frame, points=(), initzone=(), mask=(), show_trail=True):
+    def display_frame(self, frame, points=(), initzone=(), mask=(), show_trail=True, contour=None):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
         Args:
@@ -112,6 +118,7 @@ class VideoWidget(QWidget):
             initzone (tuple): Tuple containing (x, y, radius) of initiation zone
             mask (tuple): Tuple containing (x, y, radius) of mask
             show_trail (bool): If True, shows the trail of recent centroids. If False, shows only the latest point.
+            contour (np.ndarray): OpenCV contour array to display (optional)
         """
         h, w = frame.shape  # Grayscale frames have only height and width
         bytes_per_line = w
@@ -126,9 +133,17 @@ class VideoWidget(QWidget):
         if len(mask):
             self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240))
             #self.add_rectangular_roi(pixmap, mask)
+        
+        # Draw contour if enabled and provided
+        if self.show_contours and contour is not None:
+            self.add_contour(pixmap, contour)
+        
         # Update first point trail with new first point
         if points and points[0][0] > 0:
             self.update_first_point_trail(points[0])
+        else:
+            # Clear trail if no valid point is detected
+            self.clear_first_point_trail()
         
         # Draw centroids based on show_trail parameter
         if show_trail:
@@ -211,6 +226,42 @@ class VideoWidget(QWidget):
         # Trim existing trail if necessary
         while len(self.first_point_trail) > self.max_trail_length:
             self.first_point_trail.pop(0)
+
+    def set_contour_display(self, show: bool):
+        """
+        Enable or disable contour display.
+        Args:
+            show (bool): If True, contours will be displayed on the video.
+        """
+        self.show_contours = show
+
+    def add_contour(self, pixmap: QPixmap, contour):
+        """
+        Draw a contour on the pixmap.
+        Args:
+            pixmap (QPixmap): The pixmap to draw on.
+            contour (np.ndarray): OpenCV contour array (Nx1x2 shape).
+        """
+        if contour is None or len(contour) == 0:
+            return
+        
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Set pen for contour outline
+        pen = QPen(QColor(*CONTOUR_COLOR), 2, Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        
+        # Draw the contour as a polygon
+        # Contour shape is typically (N, 1, 2) - reshape to (N, 2)
+        points = contour.reshape(-1, 2)
+        
+        # Convert to Qt points and draw
+        qt_points = [QPointF(float(x), float(y)) for x, y in points]
+        polygon = QPolygonF(qt_points)
+        painter.drawPolygon(polygon)
+        
+        painter.end()
 
     def add_circular_roi(self, pixmap: QPixmap, center: tuple, radius: int,
                 color: tuple = (32,74,135)) -> QPixmap:

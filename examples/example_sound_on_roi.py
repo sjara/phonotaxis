@@ -162,7 +162,7 @@ class Task(QMainWindow):
         self.video_thread.frame_processed.connect(self.update_image)
         self.video_thread.start()
 
-    def update_image(self, timestamp, frame, points):
+    def update_image(self, timestamp, frame, points, contour):
         """Updates the video display label with new frames and points."""
         if self.session_running:
             self.check_initzone(points[0])  # Send first point: centroid
@@ -170,7 +170,7 @@ class Task(QMainWindow):
             # FIXME: is the centroid point (x, y) or (row, col)?
             self.frame_data['centroid_x'].append(points[0][0])
             self.frame_data['centroid_y'].append(points[0][1])
-        self.video_widget.display_frame(frame, points, self.initzone, self.mask)
+        self.video_widget.display_frame(frame, points, self.initzone, self.mask, contour=contour)
         if self.session_running:
             self.params['sessionTime'].set_value(timestamp - self.session_start_time)
             if timestamp - self.session_start_time >= self.params['sessionDuration'].get_value():

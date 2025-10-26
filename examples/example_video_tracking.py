@@ -39,10 +39,14 @@ class TestVideoThreshold(QMainWindow):
         self.video_thread.frame_processed.connect(self.update_image)
         self.update_threshold(self.threshold_slider.value)
         self.update_minarea(self.minarea_slider.value)
+        
+        # Enable contour display to visualize the tracked area
+        self.video_widget.set_contour_display(True)
+        
         self.video_thread.start()
         
-    def update_image(self, timestamp, frame, points):
-        self.video_widget.display_frame(frame, points)
+    def update_image(self, timestamp, frame, points, contour):
+        self.video_widget.display_frame(frame, points, contour=contour)
         
     def update_threshold(self, value):
         self.video_thread.set_threshold(value)
