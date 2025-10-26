@@ -1,6 +1,9 @@
 """
 Classes for assembling a state transition matrix, timers and outputs.
 
+This module provides the StateMatrix class for defining behavioral state machines
+with event-driven transitions, timers, and output control.
+
 NOTES:
 
 * The state matrix is represented by Python lists during construction for flexibility,
@@ -12,18 +15,20 @@ NOTES:
   Each element contains the outputs for each state as a list of 0 (off), 1 (on) 
   or -1 (NOCHANGE) which indicates the output should not be changed from its previous value.
 
-Input format:
-sma.add_state(name='STATENAME', statetimer=3,
-             transitions={'EVENT':NEXTSTATE},
-             outputsOn=[], outputsOff=[])
+Input format example:
+    sma.add_state(name='STATENAME', statetimer=3,
+                 transitions={'EVENT': 'NEXTSTATE'},
+                 outputsOn=['output1'], outputsOff=['output2'],
+                 integerOut=1)
 
-Output (NumPy array from get_matrix()):
-#       Ci  Co  Li  Lo  Ri  Ro  Tup
-mat = [  0,  0,  0,  0,  0,  0,  2  ]
+Output format (NumPy array from get_matrix()):
+    #       Ci  Co  Li  Lo  Ri  Ro  Tup
+    mat = [  0,  0,  0,  0,  0,  0,  2  ]
 
-Key attributes:
-- states_name_to_index: Dictionary mapping state names to their indices
-- events_dict: Dictionary mapping event names to their column indices in the matrix
+Key components:
+    - StateMatrix: Main class for building state transition matrices
+    - INFINITE_TIME: Constant (float('inf')) for states with no timeout
+    - NOCHANGE: Constant (-1) for outputs that should remain unchanged
 """
 
 from typing import Dict, List, Optional, Any
@@ -51,13 +56,28 @@ class StateMatrix():
 
     State Structure:
         - END state: Always state 0, created automatically during initialization
-        - START state: Always state 1, created automatically during initialization  
-        - User-defined states: Created after START and END states
+        - User-defined states: Created after END state (indices 1, 2, 3, ...)
 
     Main Methods:
-        get_matrix(): Returns state transition matrix as NumPy array (adds END state)
-        get_outputs(): Returns output configurations as NumPy array  
-        get_state_timers(): Returns timer durations as NumPy array
+        Construction:
+            add_state(): Add or update a state with transitions, outputs, and timers
+            set_extratimer(): Set duration for an existing extra timer
+            reset_transitions(): Reset all transitions to default self-loops
+            
+        Data Retrieval (returns NumPy arrays for runtime use):
+            get_matrix(): Returns state transition matrix as NumPy array
+            get_state_timers(): Returns timer durations as NumPy array
+            get_outputs(): Returns output configurations as NumPy array
+            get_integer_outputs(): Returns integer output values as NumPy array
+            get_extra_timers(): Returns extra timer durations as NumPy array
+            get_extra_triggers(): Returns extra timer trigger states as NumPy array
+            
+        Utilities:
+            get_timer_event_index(): Returns index of timer event ('Tup')
+            get_states_dict(): Returns bidirectional state name/index mapping
+            get_end_state_index(): Returns index of END state (always 0)
+            analyze_matrix_properties(): Analyzes matrix connectivity and properties
+            append_to_file(): Save state matrix definitions to HDF5 file
 
     Attributes:
         inputs_dict: Dictionary mapping input names to sequential indices (auto-generated)
@@ -65,21 +85,24 @@ class StateMatrix():
         state_matrix: Internal list of lists for building (use get_matrix() for NumPy access)
         state_timers: Internal list of timer durations (use get_state_timers() for NumPy access)
         state_outputs: Internal list of output configs (use get_outputs() for NumPy access)
-        integer_outputs: List of numeric output values for each state
+        integer_outputs: Internal list of numeric output values for each state
         states: Bidirectional dictionary mapping state names to indices and vice versa
-        events_dict: Dictionary mapping event names to column indices
+        events_dict: Bidirectional dictionary mapping event names to column indices
         extra_timers_names: List of extra timer names
         extra_timers_duration: List of extra timer durations
         extra_timers_triggers: List of states that trigger extra timers
+        n_input_events: Number of input events in the events dictionary
+        n_outputs: Number of outputs defined
         
     Note:
         Internal data structures use Python lists for construction flexibility.
         Use get_*() methods to obtain validated NumPy arrays for runtime efficiency.
-        The START state (state 0) and END state (last state) are managed automatically.
+        The END state (state 0) is managed automatically and serves as the waiting
+        state between trials.
     """
     def __init__(self, inputs: List[str], 
                  outputs: List[str],
-                 extratimers: Optional[List[str]] = None) -> None:
+                 extratimers: Optional[List[str]] | None = None) -> None:
         """
         Initialize StateMatrix.
         
@@ -94,8 +117,7 @@ class StateMatrix():
                         by specific states and continue running across state transitions.
 
         Note:
-            The state matrix automatically creates an END state as state 0 and
-            a START state as state 1 when initialized.
+            The state matrix automatically creates an END state as state 0 when initialized.
 
         Example:
             >>> sm = StateMatrix(
@@ -145,7 +167,7 @@ class StateMatrix():
 
         self._init_mat()
 
-    def append_to_file(self, h5file: Any, current_trial: int) -> None:
+    def append_to_file(self, h5file: Any) -> None:
         """
         Append state matrix definitions to an open HDF5 file.
         
@@ -154,12 +176,6 @@ class StateMatrix():
         
         Args:
             h5file: Open HDF5 file handle where data will be written
-            current_trial: Current trial number (parameter is ignored but kept
-                         for compatibility)
-                         
-        Note:
-            The current_trial parameter is currently ignored but maintained
-            for backward compatibility.
         """
         statemat_group = h5file.create_group('/stateMatrix')
         utils.append_dict_to_hdf5(statemat_group,'eventsNames',self.events_dict)
@@ -191,45 +207,13 @@ class StateMatrix():
 
     def _init_mat(self) -> None:
         """
-        Initialize state transition matrix with END and START states.
-        
-        Creates the initial state matrix with:
-        - END state (state 0): Waiting state between trials with infinite timer
-        - START state (state 1): Entry point for each trial with zero timer
-        
-        The END state serves as a waiting state where the machine waits
-        until it is forced to transition to the START state for the next trial.
-        
-        Raises:
-            Exception: If called when the state matrix already has states,
-                      indicating that extra timers should be created before any states.
+        Initialize state transition matrix with END state (state 0).
+                
+        The END state serves as a waiting state where the machine waits until it
+        is forced to transition to a user-defined state for the next trial.
         """
-        if len(self.state_matrix) > 0:
-            raise Exception('You need to create all extra timers before creating any state.')
-        
-        # Create END state (state 0) - waiting state with infinite timer
         self.add_state(name='END', statetimer=INFINITE_TIME)
         
-        # Create START state (state 1) - entry point with zero timer
-        #self.add_state(name='START', statetimer=0)
-        
-        # Ensure START state transitions to state 2 (first user state will be there)
-        #self._ensure_start_state_properties()
-
-    def _ensure_start_state_properties(self) -> None:
-        """
-        Ensure START state transitions to state 2 with a timer of 0.
-        
-        This maintains the special behavior of the START state as the entry point
-        for each trial. The START state (index 1) transitions to state 2 where
-        the first user-defined state will be located.
-        """
-        if 'START' in self.states and self.states['START'] == 1:
-            self.state_matrix[1][self.events_dict['Tup']] = 2  # Transition to state 2
-            self.state_timers[1] = 0  # Zero duration timer
-        else:
-            raise Exception('The START state must be at index 1.')
-
     def _append_state_to_list(self, state_name: str) -> None:
         """
         Add a new state to the available states list.
@@ -267,7 +251,8 @@ class StateMatrix():
         
         Creates or updates a state with the specified timer, transitions,
         outputs, and triggers. This is the main method for building the
-        state machine structure.
+        state machine structure. Validates that all event names, output names,
+        and timer names are valid before adding the state.
         
         Args:
             name: Name of the state. If empty string, a default name will be used.
@@ -276,13 +261,20 @@ class StateMatrix():
                        for states that should never timeout automatically.
             transitions: Dictionary mapping event names to target state names.
                         Events include input events (e.g., 'centerin', 'centerout')
-                        and timer events (e.g., 'Tup').
+                        and timer events (e.g., 'Tup'). Event names must exist in
+                        events_dict or a ValueError will be raised.
             outputsOn: List of output names to turn ON when entering this state.
+                      Output names must exist in outputs_dict or a ValueError will be raised.
             outputsOff: List of output names to turn OFF when entering this state.
+                       Output names must exist in outputs_dict or a ValueError will be raised.
             trigger: List of extra timer names to start/trigger when entering
-                    this state.
+                    this state. Timer names must exist in extra_timers_names or a
+                    ValueError will be raised.
             integerOut: Integer output when entering this state. A value of 0 means
                     no numeric output.
+        
+        Raises:
+            ValueError: If any event name, output name, or timer name is invalid.
                       
         Example:
             >>> sm.add_state(
@@ -303,6 +295,37 @@ class StateMatrix():
             outputsOff = []
         if trigger is None:
             trigger = []
+
+        # -- Validate event names in transitions --
+        for event_name in transitions.keys():
+            if event_name not in self.events_dict:
+                valid_events = [k for k in self.events_dict.keys() if k != 'Forced']
+                raise ValueError(
+                    f"Invalid event name '{event_name}' in transitions. "
+                    f"Valid event names are: {valid_events}"
+                )
+        
+        # -- Validate output names --
+        for output_name in outputsOn:
+            if output_name not in self.outputs_dict:
+                raise ValueError(
+                    f"Invalid output name '{output_name}' in outputsOn. "
+                    f"Valid output names are: {list(self.outputs_dict.keys())}"
+                )
+        for output_name in outputsOff:
+            if output_name not in self.outputs_dict:
+                raise ValueError(
+                    f"Invalid output name '{output_name}' in outputsOff. "
+                    f"Valid output names are: {list(self.outputs_dict.keys())}"
+                )
+        
+        # -- Validate extra timer names --
+        for timer_name in trigger:
+            if timer_name not in self.extra_timers_names:
+                raise ValueError(
+                    f"Invalid extra timer name '{timer_name}' in trigger. "
+                    f"Valid extra timer names are: {self.extra_timers_names}"
+                )
 
         n_extra_timers = len(self.extra_timers_names)
 
@@ -432,13 +455,10 @@ class StateMatrix():
             NumPy array of timer durations for each state in seconds.
             Array length matches the number of valid states.
         """
-        if not self.state_timers:
-            return np.empty(0, dtype=np.float64)
-            
         # Only include timers for states that actually exist
         actual_timers = []
-        for i, timer in enumerate(self.state_timers):
-            if i < len(self.state_matrix) and self.state_matrix[i]:
+        for ind, timer in enumerate(self.state_timers):
+            if ind < len(self.state_matrix) and self.state_matrix[ind]:
                 actual_timers.append(timer)
                 
         return np.array(actual_timers, dtype=np.float64)
@@ -457,11 +477,7 @@ class StateMatrix():
             
         Raises:
             ValueError: If any output values are outside the valid range [-1, 0, 1].
-        """
-        if not self.state_outputs:
-            return np.empty((0, self.n_outputs), dtype=np.int32)
-            return np.empty((0, self.n_outputs), dtype=np.int32)
-            
+        """            
         # Remove any empty rows and ensure consistent length
         actual_outputs = []
         for i, outputs in enumerate(self.state_outputs):
@@ -483,6 +499,13 @@ class StateMatrix():
     def get_integer_outputs(self) -> np.ndarray:
         """
         Get the integer outputs as a NumPy array.
+        
+        Integer outputs are numeric values that can be emitted when entering a state,
+        useful for signaling specific events or conditions to external systems.
+
+        Returns:
+            NumPy array of integers representing numeric output for each state.
+            A value of 0 means no numeric output for that state.
         """
         return np.array(self.integer_outputs, dtype=np.int32)
 
@@ -498,20 +521,48 @@ class StateMatrix():
 
     def analyze_matrix_properties(self) -> Dict[str, Any]:
         """
-        Analyze matrix properties using NumPy for insights.
+        Analyze state matrix properties for debugging and validation.
+        
+        Performs connectivity analysis on the state matrix to identify potential
+        issues such as unreachable states or dead-end states.
         
         Returns:
-            Dictionary with analysis results including connectivity,
-            dead ends, cycles, etc.
+            Dictionary with the following keys:
+                - n_states: Number of states in the matrix
+                - n_events: Number of events (columns) in the matrix
+                - reachable_states: Sorted list of state indices reachable from state 0
+                - unreachable_states: Sorted list of state indices that cannot be reached
+                - dead_end_states: List of states with only self-transitions
+                - connectivity_ratio: Ratio of unique target states to total states
+                - is_fully_connected: True if all states are reachable
+                - matrix_density: Proportion of non-self-loop transitions
+                
+            If analysis fails, returns dictionary with 'error' and 'valid' keys.
+        
+        Example:
+            >>> props = sm.analyze_matrix_properties()
+            >>> if props.get('unreachable_states'):
+            ...     print(f"Warning: States {props['unreachable_states']} are unreachable")
         """
         try:
             matrix = self.get_matrix()
             n_states, n_events = matrix.shape
             
-            # Find reachable states
-            reachable = set([0])  # Assume state 0 is always reachable
-            for state in range(n_states):
-                reachable.update(matrix[state])
+            # Find reachable states using graph traversal from State 1. Note that State 1 is
+            # the entry point for behavioral sequences, reached only via forced transitions.
+            # We only count states reachable via matrix transitions, not the forced entry point.           
+            # State 0 (END) is a waiting state (dead-end), but should generally be reachable.
+            to_visit = [1] if n_states > 1 else []
+            reachable = set([])
+            while to_visit:
+                current_state = to_visit.pop()
+                # Check all transitions from current state
+                for next_state in matrix[current_state]:
+                    next_state = int(next_state)  # Convert numpy int to Python int
+                    # Only add if it's not a self-transition and not already reachable
+                    if next_state != current_state and next_state not in reachable:
+                        reachable.add(next_state)
+                        to_visit.append(next_state)
             
             all_states = set(range(n_states))
             unreachable = all_states - reachable
@@ -520,7 +571,7 @@ class StateMatrix():
             dead_ends = []
             for state in range(n_states):
                 if np.all(matrix[state] == state):
-                    dead_ends.append(state)
+                    dead_ends.append(int(state))  # Convert to Python int
             
             # Calculate connectivity metrics
             unique_transitions = len(np.unique(matrix))
@@ -546,52 +597,35 @@ class StateMatrix():
         Resets all states to have self-transitions for all events, very long
         timers, and unchanged output configurations. This effectively clears
         all custom transitions while preserving the state structure.
-        The START state (index 1) is treated specially - it keeps its zero
-        timer and transitions to state 2 if it exists.
         
         Note:
             This method preserves the states themselves but removes all
             custom transition logic, timers, and output configurations.
-            The START state maintains its special behavior.
         """
         for state_ind in self.states.inverse.keys():
             self.state_matrix[state_ind] = self._make_default_row(state_ind)
             self.state_timers[state_ind] = INFINITE_TIME
             self.state_outputs[state_ind] = self.n_outputs*[NOCHANGE]
-        
-        # Restore special START state behavior
-        #self._ensure_start_state_properties()
 
-    def get_integer_outputs(self) -> List[int]:
+    def get_extra_timers(self) -> np.ndarray:
         """
-        Get the num output values for all states.
+        Get the durations of all extra timers as a NumPy array.
         
         Returns:
-            List of integers representing num output values for each state.
-            0 means no num output. A positive number will turn that output ON,
-            a negative number will turn that output OFF.
-        """
-        return self.integer_outputs
-
-    def get_extra_timers(self) -> List[float]:
-        """
-        Get the durations of all extra timers.
-        
-        Returns:
-            List of floats representing the duration in seconds of each
+            NumPy array of floats representing the duration in seconds of each
             extra timer.
         """
-        return self.extra_timers_duration
+        return np.array(self.extra_timers_duration, dtype=np.float64)
 
-    def get_extra_triggers(self) -> List[int]:
+    def get_extra_triggers(self) -> np.ndarray:
         """
-        Get the trigger states for all extra timers.
+        Get the trigger states for all extra timers as a NumPy array.
         
         Returns:
-            List of integers representing which state index triggers each
+            NumPy array of integers representing which state index triggers each
             extra timer.
         """
-        return self.extra_timers_triggers
+        return np.array(self.extra_timers_triggers, dtype=np.int32)
 
     def get_states_dict(self) -> bidict:
         """
@@ -686,12 +720,16 @@ class StateMatrix():
     
 
 if __name__ == '__main__':
+    from pprint import pprint
     # Example usage of the StateMatrix class
     sm = StateMatrix(inputs=[], outputs=[])
+    sm.add_state(name='state1')
     print(sm)    
     print(f'End state index: {sm.get_end_state_index()}')
+    pprint(sm.analyze_matrix_properties(), sort_dicts=False)
 
-    import h5py
-    h5file = h5py.File('/tmp/test.h5', 'w')
-    sm.append_to_file(h5file, 0)
+    if 0:
+        import h5py
+        h5file = h5py.File('/tmp/test.h5', 'w')
+        sm.append_to_file(h5file, 0)
 

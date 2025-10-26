@@ -3,16 +3,39 @@ State machine.
 
 This module implements a state machine using PyQt. The transitions are defined
 in a state matrix, and the machine can handle inputs, outputs, and timers.
+
+The state machine operates on NumPy arrays that define:
+- State transition matrix: which state to move to for each input event
+- State timers: how long to stay in each state before timeout
+- State outputs: what outputs to activate/deactivate in each state
+- Integer outputs: optional integer values to emit when entering states
+
+Typical workflow:
+    1. Create a StateMachine instance
+    2. Configure it using set_state_matrix(), set_state_outputs(), set_state_timers()
+    3. Optionally set integer outputs using set_integer_outputs()
+    4. Connect external signals to input events using connect_input_signal()
+    5. Connect to output signals (stateChanged, outputChanged, etc.)
+    6. Call start() to begin operation
+    7. Use force_state() to transition to the first behavioral state
+    8. The machine runs until stop() is called or END state is reached
+
+Example:
+    >>> sm = StateMachine()
+    >>> sm.set_state_matrix(state_matrix, timer_event_index=4)
+    >>> sm.set_state_timers(timers)
+    >>> sm.set_state_outputs(outputs)
+    >>> sm.start()
+    >>> sm.force_state(1)  # Move to first behavioral state
 """
 
 import time
 import numpy as np
-from PyQt6 import QtCore, QtWidgets
-from typing import List, Dict, Optional, Any
-import warnings
+from PyQt6 import QtCore
+from typing import Dict, Optional, Any
 
 
-DEBUG = False
+PREFIX = " StateMachine:"
 
 
 class StateMachine(QtCore.QObject):
@@ -23,6 +46,9 @@ class StateMachine(QtCore.QObject):
     - Each row represents a state
     - Each column represents an input event
     - Matrix values indicate the next state for each event
+    
+    Args:
+        debug: Enable debug output for event processing (default False)
     
     Signals:
         stateChanged(int): Emitted when state changes. Args: newStateIndex.
@@ -72,14 +98,19 @@ class StateMachine(QtCore.QObject):
     eventProcessed = QtCore.pyqtSignal(int, float, int)  # eventIndex, timestamp, newState
     _stateTimerExpired = QtCore.pyqtSignal()  # stateTimer expiration internal signal
     
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         """
         Initialize an empty state machine.
+        
+        Args:
+            debug: Enable debug output (default False)
         
         Use set_state_matrix(), set_state_outputs(), and set_state_timers() 
         to configure the state machine before starting.
         """
         super().__init__()
+        
+        self.debug = debug
         
         # Initialize empty state machine
         self.state_matrix = None
@@ -106,15 +137,24 @@ class StateMachine(QtCore.QObject):
         # Connect force state transition signal
         self.forceStateTransition.connect(self._on_force_state_transition)
         
-    def set_state_matrix(self, state_matrix: np.ndarray, timer_event_index: Optional[int] = None):
+    def set_state_matrix(self, state_matrix: np.ndarray, timer_event_index: Optional[int] = None) -> None:
         """
         Set the state matrix for the state machine.
+        
+        The state matrix defines all possible state transitions. Each row represents
+        a state, and each column represents an input event. The matrix values are
+        the indices of the next state to transition to when that event occurs.
         
         Args:
             state_matrix: 2D NumPy array where each row is a state and each column is an input event.
                          Values are the next state indices for each event.
             timer_event_index: Index of the timer expiration event column in the state matrix.
                               If None, assumes the last column is the timer event.
+        
+        Raises:
+            RuntimeError: If state machine is currently running
+            TypeError: If state_matrix is not a NumPy array
+            ValueError: If state_matrix is empty, not 2D, or contains invalid state indices
         """
         if self.is_running:
             raise RuntimeError("Cannot modify state matrix while state machine is running")
@@ -158,12 +198,27 @@ class StateMachine(QtCore.QObject):
             copy_size = min(len(old_timers), self.num_states)
             self.state_timers[:copy_size] = old_timers[:copy_size]
             
-    def set_state_timers(self, state_timers: np.ndarray):
+    def set_state_timers(self, state_timers: np.ndarray) -> None:
         """
         Set the state timers for the state machine.
         
+        State timers define how long the state machine will wait in each state
+        before triggering a timeout event. Use float('inf') for states that
+        should wait indefinitely (no timeout).
+        
         Args:
             state_timers: 1D NumPy array of timer durations for each state (seconds).
+        
+        Raises:
+            RuntimeError: If state machine is currently running
+            TypeError: If state_timers is not a NumPy array
+            ValueError: If state_timers is not 1D or length doesn't match number of states
+        
+        Note:
+            Timer precision is limited to approximately 1 millisecond due to Qt's
+            QTimer implementation. Timer durations are converted to milliseconds and
+            rounded to the nearest integer. For sub-millisecond precision, consider
+            alternative timing mechanisms.
         """
         if self.is_running:
             raise RuntimeError("Cannot modify state timers while state machine is running")
@@ -179,13 +234,25 @@ class StateMachine(QtCore.QObject):
             
         self.state_timers = state_timers.astype(np.float64)
         
-    def set_state_outputs(self, state_outputs: np.ndarray):
+    def set_state_outputs(self, state_outputs: np.ndarray) -> None:
         """
         Set the state outputs for the state machine.
+        
+        State outputs define which outputs should be turned on, off, or left unchanged
+        when entering each state. When a state is entered, only outputs with explicit
+        on (1) or off (0) values will change; outputs with -1 (no change) will maintain
+        their current state. All outputs are initialized to False (off) when this method
+        is called.
         
         Args:
             state_outputs: 2D NumPy array where each row contains output values for a state.
                           Values: 0 (off), 1 (on), -1 (no change)
+        
+        Raises:
+            RuntimeError: If state machine is currently running
+            TypeError: If state_outputs is not a NumPy array
+            ValueError: If state_outputs is not 2D, has mismatched rows with state matrix,
+                       or contains values other than -1, 0, or 1
         """
         if self.is_running:
             raise RuntimeError("Cannot modify state outputs while state machine is running")
@@ -213,13 +280,38 @@ class StateMachine(QtCore.QObject):
         # Initialize output states
         self.output_states = [False] * self.num_outputs
         
-    def set_integer_outputs(self, integer_outputs: np.ndarray):
+    def set_integer_outputs(self, integer_outputs: np.ndarray) -> None:
         """
         Set the state integer outputs for the state machine.
+        
+        Integer outputs are emitted via the integerOutput signal when entering
+        a state. This can be used to trigger external actions with parameters
+        (e.g., play specific sound stimuli identified by integer codes).
+        
+        Args:
+            integer_outputs: 1D NumPy array of integer values for each state.
+                           A value of 0 means no integer output for that state.
+        
+        Raises:
+            RuntimeError: If state machine is running
+            TypeError: If integer_outputs is not a NumPy array
+            ValueError: If integer_outputs dimension or size is invalid
         """
-        self.integer_outputs = integer_outputs
+        if self.is_running:
+            raise RuntimeError("Cannot modify integer outputs while state machine is running")
+            
+        # Validate that input is a NumPy array
+        if not isinstance(integer_outputs, np.ndarray):
+            raise TypeError("integer_outputs must be a NumPy array")
+            
+        if integer_outputs.ndim != 1:
+            raise ValueError("Integer outputs must be 1-dimensional")
+        if self.state_matrix is not None and len(integer_outputs) != self.num_states:
+            raise ValueError("Integer outputs must have same length as number of states")
+            
+        self.integer_outputs = integer_outputs.astype(np.int32)
     
-    def reset(self):
+    def reset(self) -> None:
         """
         Reset the state machine to empty state.
         
@@ -234,6 +326,7 @@ class StateMachine(QtCore.QObject):
         self.state_matrix = None
         self.state_outputs = None
         self.state_timers = None
+        self.integer_outputs = None
         self.timer_event_index = None
         
         self.num_states = 0
@@ -255,13 +348,13 @@ class StateMachine(QtCore.QObject):
                 self.state_outputs is not None and 
                 self.state_timers is not None)
         
-    def start(self):
+    def start(self) -> None:
         """
         Start the state machine.
         
-        The state machine always starts in the END state (last state), which is the
-        standard initialization pattern. Use force_state()
-        to move to the first behavioral state after starting.
+        The state machine always starts in state 0 (typically the END/waiting state),
+        which is the standard initialization pattern. Use force_state() to transition
+        to the first behavioral state after starting.
             
         Raises:
             RuntimeError: If state machine is not fully configured
@@ -271,23 +364,39 @@ class StateMachine(QtCore.QObject):
                              "Use set_state_matrix() and set_state_outputs() first.")
             
         self.is_running = True
-        # Always start at the END state (-1) to ensure consistent initialization
-        # but don't emit state change or outputs yet
-        # self.force_state(-1)
-        # self._enter_state(self.num_states - 1)
-        self.current_state = self.num_states - 1
+        # Always start at state 0 (END/waiting state)
+        self.current_state = 0
         
-    def stop(self):
-        """Stop the state machine."""
+    def stop(self) -> None:
+        """
+        Stop the state machine.
+        
+        Stops the state machine from processing events and cancels any active state timer.
+        The current state and output values are preserved and can be inspected after
+        stopping. The state machine can be restarted with start().
+        """
         self.is_running = False
         self.state_timer.stop()
                    
-    def process_input(self, input_event: int):
+    def process_input(self, input_event: int) -> None:
         """
         Process an input event and potentially transition to a new state.
         
+        Looks up the next state from the state matrix based on the current state
+        and input event, then transitions to that state if it's different from
+        the current state. If the state machine is not running, this method
+        returns immediately without doing anything.
+        
         Args:
             input_event: Input event index
+        
+        Raises:
+            RuntimeError: If state machine is not configured
+            ValueError: If input_event index is invalid
+        
+        Note:
+            This method is a no-op if the state machine is not running (i.e., 
+            before start() is called or after stop() is called).
         """
         if not self.is_running:
             return
@@ -298,24 +407,39 @@ class StateMachine(QtCore.QObject):
         if not (0 <= input_event < self.num_inputs):
             raise ValueError(f"Invalid input index: {input_event}")
             
-        if DEBUG:
-            print(f"Processing input event {input_event} in state {self.current_state}")
+        if self.debug:
+            print(f"{PREFIX} Processing input event {input_event} in state {self.current_state}")
             
         # Delegate to unified event processing method
         self._process_event(input_event)
             
-    def connect_input_signal(self, signal: QtCore.pyqtSignal, input_event: int):
+    def connect_input_signal(self, signal: QtCore.pyqtSignal, input_event: int) -> None:
         """
         Connect a PyQt signal to an input event.
+        
+        When the connected signal is emitted, the specified input event will be
+        automatically processed. The connection persists until the signal or
+        state machine is destroyed. This method does not validate the input_event
+        index; validation occurs when the signal is actually emitted.
         
         Args:
             signal: PyQt signal to connect
             input_event: Input event index to trigger when signal is emitted
+        
+        Note:
+            Multiple signals can be connected to the same input event, and one
+            signal can trigger multiple input events by calling this method
+            multiple times with different input_event values.
         """
         signal.connect(lambda: self.process_input(input_event))
         
     def get_current_state(self) -> int:
-        """Get current state index."""
+        """
+        Get current state index.
+        
+        Returns:
+            Index of the state the machine is currently in.
+        """
         return self.current_state
         
     def get_output_state(self, output: int) -> bool:
@@ -333,13 +457,25 @@ class StateMachine(QtCore.QObject):
             
         return self.output_states[output]
         
-    def set_state_timer(self, state: int, duration: float):
+    def set_state_timer(self, state: int, duration: float) -> None:
         """
         Set the timer duration for a state.
+        
+        Updates the timer duration for a specific state. If the state machine is
+        currently in the specified state and running, the timer will be restarted
+        with the new duration.
         
         Args:
             state: State index
             duration: Timer duration in seconds
+        
+        Raises:
+            RuntimeError: If state machine is not configured
+            ValueError: If state index is invalid
+        
+        Note:
+            If currently in the specified state, the timer is automatically restarted
+            with the new duration. Use float('inf') for no timeout.
         """
         if not self.is_configured():
             raise RuntimeError("State machine is not configured")
@@ -353,7 +489,7 @@ class StateMachine(QtCore.QObject):
         if state == self.current_state and self.is_running:
             self._start_state_timer()
             
-    def force_state(self, state_index: int):
+    def force_state(self, state_index: int) -> None:
         """
         Force a transition to a specific state, bypassing the state matrix.
         
@@ -370,9 +506,7 @@ class StateMachine(QtCore.QObject):
             RuntimeError: If state machine is not configured
         """
         if not self.is_configured():
-            warnings.warn("State machine is not configured. No state was forced.")
-            return
-            #raise RuntimeError("State machine is not configured")
+            raise RuntimeError("State machine is not configured")
             
         # Handle -1 as last state
         if state_index == -1:
@@ -388,7 +522,7 @@ class StateMachine(QtCore.QObject):
             self.eventProcessed.emit(-1, timestamp, state_index)
             self._enter_state(state_index)
 
-    def force_output(self, output: int, value: bool):
+    def force_output(self, output: int, value: bool) -> None:
         """
         Force an output to a specific value, bypassing normal state-based output control.
         
@@ -406,9 +540,7 @@ class StateMachine(QtCore.QObject):
             RuntimeError: If state machine is not configured
         """
         if not self.is_configured():
-            warnings.warn("State machine is not configured. No output was forced.")
-            return
-            #raise RuntimeError("State machine is not configured")
+            raise RuntimeError("State machine is not configured")
             
         if not (0 <= output < self.num_outputs):
             raise ValueError(f"Invalid output index: {output}")
@@ -418,7 +550,7 @@ class StateMachine(QtCore.QObject):
             self.output_states[output] = value
             self.outputChanged.emit(output, value)
 
-    def _enter_state(self, state_index: int):
+    def _enter_state(self, state_index: int) -> None:
         """
         Enter a new state, handling outputs and timers.
         
@@ -428,7 +560,6 @@ class StateMachine(QtCore.QObject):
         if not (0 <= state_index < self.num_states):
             raise ValueError(f"Invalid state index: {state_index}")
             
-        old_state = self.current_state
         self.current_state = state_index
         
         # Stop current timer
@@ -446,7 +577,7 @@ class StateMachine(QtCore.QObject):
         # Emit state change signal
         self.stateChanged.emit(self.current_state)
         
-    def _process_state_outputs(self):
+    def _process_state_outputs(self) -> None:
         """Process output changes for the current state."""
         if self.state_outputs is None:
             return
@@ -464,7 +595,7 @@ class StateMachine(QtCore.QObject):
                     self.outputChanged.emit(ind, True)
             # output_value == -1 means no change, so we do nothing
             
-    def _process_integer_outputs(self):
+    def _process_integer_outputs(self) -> None:
         """Process output changes for the current state."""
         if self.integer_outputs is None:
             return
@@ -472,22 +603,22 @@ class StateMachine(QtCore.QObject):
         if iout != 0:
             self.integerOutput.emit(iout)
             
-    def _start_state_timer(self):
+    def _start_state_timer(self) -> None:
         """Start the timer for the current state."""
         if self.state_timers is None:
             return
         timer_duration = self.state_timers[self.current_state]
         if timer_duration != float('inf') and timer_duration >= 0:
-            self.state_timer.start(int(timer_duration * 1000))  # Convert to milliseconds
+            self.state_timer.start(round(timer_duration * 1000))  # Convert to milliseconds
             
-    def _on_state_timer_expired(self):
+    def _on_state_timer_expired(self) -> None:
         """Handle state timer expiration as a special input event."""
         if not self.is_running or not self.is_configured():
             return
         # Delegate to unified event processing method using timer event index
         self._process_event(self.timer_event_index)
         
-    def _process_event(self, event_index: int):
+    def _process_event(self, event_index: int) -> None:
         """
         Unified method to process any event (input or timer) and potentially transition to a new state.
         
@@ -513,7 +644,7 @@ class StateMachine(QtCore.QObject):
         if next_state != self.current_state:
             self._enter_state(next_state)
             
-    def _on_force_state_transition(self, state_index: int):
+    def _on_force_state_transition(self, state_index: int) -> None:
         """Handle forced state transition via signal."""
         if not self.is_configured():
             return
@@ -529,7 +660,15 @@ class StateMachine(QtCore.QObject):
         Get comprehensive information about the current state machine.
         
         Returns:
-            Dictionary with state machine information
+            Dictionary with state machine information containing:
+                - 'current_state' (int): Index of the current state
+                - 'is_running' (bool): Whether the state machine is running
+                - 'is_configured' (bool): Whether the state machine is fully configured
+                - 'num_states' (int): Total number of states
+                - 'num_inputs' (int): Total number of input events
+                - 'num_outputs' (int): Total number of outputs
+                - 'output_states' (list): Current state of each output (True=on, False=off)
+                - 'state_timers' (np.ndarray or None): Copy of state timers array, or None if not set
         """
         return {
             'current_state': self.current_state,
@@ -554,6 +693,7 @@ class StateMachine(QtCore.QObject):
             
         Raises:
             RuntimeError: If state machine is not configured
+            ValueError: If state index is invalid
         """
         if not self.is_configured():
             raise RuntimeError("State machine is not configured")
@@ -575,6 +715,7 @@ class StateMachine(QtCore.QObject):
             
         Raises:
             RuntimeError: If state machine is not configured
+            ValueError: If input_event index is invalid
         """
         if not self.is_configured():
             raise RuntimeError("State machine is not configured")
