@@ -442,12 +442,14 @@ class ControllerGUI(QtWidgets.QGroupBox):
         
         self.controller = controller
         self.is_running = False
+        self.last_event_name = '--'
         
         # Display formats
         self._time_format = 'Time: {:.1f} s'
         self._state_format = 'State: [{}] {}'
         self._event_format = 'Events: {}'
         self._trial_format = 'Trial: {}'
+        self._last_event_format = 'Last event: {}'
         
         self._setup_ui(min_width)
         self._connect_signals()
@@ -460,24 +462,27 @@ class ControllerGUI(QtWidgets.QGroupBox):
         
         # Status labels
         self.time_label = QtWidgets.QLabel()
-        self.state_label = QtWidgets.QLabel()
         self.event_count_label = QtWidgets.QLabel()
         self.trial_label = QtWidgets.QLabel()
+        self.last_event_label = QtWidgets.QLabel()
+        self.state_label = QtWidgets.QLabel()
         
         # Set fixed widths for consistent layout
         label_fixed_width = 120
         self.time_label.setFixedWidth(label_fixed_width)
-        self.state_label.setFixedWidth(label_fixed_width)
         self.event_count_label.setFixedWidth(label_fixed_width)
         self.trial_label.setFixedWidth(label_fixed_width)
+        self.last_event_label.setFixedWidth(label_fixed_width)
+        self.state_label.setFixedWidth(2*label_fixed_width)
         
         # Left-align all labels
         alignment = QtCore.Qt.AlignmentFlag.AlignLeft
         self.time_label.setAlignment(alignment)
-        self.state_label.setAlignment(alignment)
         self.event_count_label.setAlignment(alignment)
         self.trial_label.setAlignment(alignment)
-        
+        self.last_event_label.setAlignment(alignment)
+        self.state_label.setAlignment(alignment)
+
         # Control button
         self.start_stop_button = QtWidgets.QPushButton('')
         self.start_stop_button.setCheckable(False)
@@ -489,13 +494,14 @@ class ControllerGUI(QtWidgets.QGroupBox):
         button_font.setBold(True)
         self.start_stop_button.setFont(button_font)
         
-        # Layout
+        # Layout - Three rows of status information
         layout = QtWidgets.QGridLayout()
         layout.addWidget(self.time_label, 0, 0)
-        layout.addWidget(self.state_label, 1, 1)
-        layout.addWidget(self.event_count_label, 0, 1)
-        layout.addWidget(self.trial_label, 1, 0)
-        layout.addWidget(self.start_stop_button, 2, 0, 1, 2)  # Span 2 columns
+        layout.addWidget(self.trial_label, 0, 1)
+        layout.addWidget(self.last_event_label, 1, 0)
+        layout.addWidget(self.event_count_label, 1, 1)
+        layout.addWidget(self.state_label, 2, 0, 1, 2)  # Span 2 columns
+        layout.addWidget(self.start_stop_button, 3, 0, 1, 2)  # Span 2 columns
         
         self.setLayout(layout)
         
@@ -568,6 +574,19 @@ class ControllerGUI(QtWidgets.QGroupBox):
             
         self.state_label.setText(self._state_format.format(current_state, state_name))
         self.event_count_label.setText(self._event_format.format(event_count))
+        
+        # Get last event name if available
+        if (self.controller and self.controller.events and 
+            self.controller.state_matrix and self.controller.state_matrix.events_dict):
+            last_event_idx = self.controller.events[-1]
+            if last_event_idx in self.controller.state_matrix.events_dict.inverse:
+                self.last_event_name = self.controller.state_matrix.events_dict.inverse[last_event_idx]
+            else:
+                self.last_event_name = str(last_event_idx)
+        else:
+            self.last_event_name = '--'
+        
+        self.last_event_label.setText(self._last_event_format.format(self.last_event_name))
         
         if current_trial >= 0:
             self.trial_label.setText(self._trial_format.format(current_trial))
