@@ -46,9 +46,6 @@ class Task(QMainWindow):
         #self.setGeometry(100, 100, 800, 600)
         self.setWindowIcon(gui.create_icon())
 
-        self.initzone = DEFAULT_INITZONE.copy()
-        self.mask = DEFAULT_MASK.copy()
-
         # -- Connect messenger --
         self.messagebar = gui.Messenger()
         self.messagebar.timed_message.connect(self._show_message)
@@ -57,14 +54,9 @@ class Task(QMainWindow):
         # -- Main widgets --
         self.session_running = False
         self.controller = controller.SessionController(debug=False)
-        self.video_widget = widgets.VideoWidget()
-        self.video_widget.set_contour_display(True)
-
-        # -- Additional GUI --
-        self.threshold_slider = widgets.SliderWidget(maxvalue=255, label="Threshold", value=BLACK_THRESHOLD)
-        self.minarea_slider = widgets.SliderWidget(maxvalue=16000, label="Min area", value=MIN_AREA)
-        self.initzone_radius_slider = widgets.SliderWidget(maxvalue=300, label="IZ radius", value=self.initzone[2])
-        self.mask_radius_slider = widgets.SliderWidget(maxvalue=300, label="Mask radius", value=self.mask[2])
+        self.video_widget = widgets.VideoWidget(controls=True, threshold=BLACK_THRESHOLD,
+                                                minarea=MIN_AREA, initzone_radius=DEFAULT_INITZONE[2],
+                                                mask_radius=DEFAULT_MASK[2])
 
         # -- Connect signals from GUI --
         #self.controller.status_update.connect(self.on_timer_tick)
@@ -81,18 +73,30 @@ class Task(QMainWindow):
         self.results.labels['choice'] = bidict({'left':0, 'right':1, 'none':2})
         self.results['choice'] = np.empty(maxNtrials, dtype=int)
 
-        self.params = gui.Container()
-        self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
-        self.params['trainer'] = gui.StringParam('Trainer', value='', group='Session info')
-        self.params['sessionDuration'] = gui.NumericParam('Duration', value=200, units='s',
-                                                        group='Session info')
-        self.sessionInfo = self.params.layout_group('Session info')
+        # -- NEW: Use SessionInfo widget instead of manual parameter creation --
+        self.session_info = widgets.SessionInfo()
+        # You can set custom default values if needed:
+        self.session_info.set_values({
+            'subject': 'test000',
+            'trainer': '',
+            'maxSessionDuration': 200,
+            'maxTrials': 1000
+        })
 
+        # self.params = gui.Container()
+        # self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
+        # self.params['trainer'] = gui.StringParam('Trainer', value='', group='Session info')
+        # self.params['sessionDuration'] = gui.NumericParam('Duration', value=200, units='s',
+        #                                                 group='Session info')
+        # self.sessionInfo = self.params.layout_group('Session info')
+
+        # -- Other task parameters (not session info) --
+        self.params = gui.Container()
         self.params['soundDuration'] = gui.NumericParam('Sound duration', value=0.4, units='s',
                                                         group='Other params')
         self.params['valveDuration'] = gui.NumericParam('Valve duration', value=0.1, units='s', 
                                                         group='Other params')
-        self.otherParams = self.params.layout_group('Other params')  
+        self.other_params = self.params.layout_group('Other params')  
 
         # --- GUI layout ---
         self.central_widget = QWidget()
@@ -105,20 +109,10 @@ class Task(QMainWindow):
         self.layout.addLayout(col2)
 
         col1.addWidget(self.video_widget)
-        col1.addWidget(self.threshold_slider)
-        col1.addWidget(self.minarea_slider)
-        col1.addWidget(self.initzone_radius_slider)
-        col1.addWidget(self.mask_radius_slider)
-
-        # hbox = QHBoxLayout()
-        # hbox.addWidget(self.controller.gui)
-        # hbox.addWidget(self.sessionInfo)
-        # # hbox.addWidget(self.savedata_widget)
-        # col1.addLayout(hbox)
 
         col2.addWidget(self.controller.gui)
-        col2.addWidget(self.sessionInfo)
-        col2.addWidget(self.otherParams)
+        col2.addWidget(self.session_info)
+        col2.addWidget(self.other_params)
         col2.addStretch()
 
         # -- Initialize video --
@@ -126,23 +120,8 @@ class Task(QMainWindow):
         self.frame_data = {'timestamp': [], 'centroid_x': [], 'centroid_y': []}  # To store frame data
         self.trial_data = []  # To store trial data for later analysis
 
-        # -- Connect signals from GUI --
-        self.threshold_slider.value_changed.connect(self.update_threshold)
-        self.minarea_slider.value_changed.connect(self.update_minarea)
-        self.initzone_radius_slider.value_changed.connect(self.update_initzone)
-        self.mask_radius_slider.value_changed.connect(self.update_mask)
-
-        # -- Sound player --
-        self.sound_player = soundmodule.SoundPlayer()
-        self.sound_player.connect_state_machine(self.controller.state_machine)
-
-        # -- State machine --
-        self.sm = statematrix.StateMatrix(inputs=INPUTS, outputs=OUTPUTS)
-
         # -- Video interface for zone detection --
-        video_zones = {
-            'IZ': ('circular', tuple(self.initzone))  # initzone is [cx, cy, radius]
-        }
+        video_zones = { 'IZ': ('circular', tuple(DEFAULT_INITZONE)) }
         self.video_interface = videomodule.VideoInterface(
             video_thread=self.video_thread,
             zones=video_zones,
@@ -150,6 +129,17 @@ class Task(QMainWindow):
         )
         self.video_interface.connect_state_machine(self.controller.state_machine)
         self.messagebar.collect("Video interface initialized.")
+        
+        # Connect video widget controls to video thread and video interface
+        self.video_widget.connect_video_thread(self.video_thread)
+        self.video_widget.connect_video_interface(self.video_interface, zone_name='IZ')
+
+        # -- Sound player --
+        self.sound_player = soundmodule.SoundPlayer()
+        self.sound_player.connect_state_machine(self.controller.state_machine)
+
+        # -- State machine --
+        self.sm = statematrix.StateMatrix(inputs=INPUTS, outputs=OUTPUTS)
 
         # Calculate event offset for Arduino/Emulator (video events come first)
         # Each video zone creates 2 events ('in' and 'out')
@@ -174,28 +164,13 @@ class Task(QMainWindow):
         self.statusBar().showMessage(str(msg))
         print(msg)
 
-    def update_threshold(self, value):
-        self.video_thread.set_threshold(value)
-
-    def update_minarea(self, value):
-        self.video_thread.set_minarea(value)
-
-    def update_initzone(self, radius):
-        self.initzone[2] = radius
-        # Update the video interface zone coordinates
-        self.video_interface.add_zone('IZ', 'circular', tuple(self.initzone))
-
-    def update_mask(self, radius):
-        self.mask[2] = radius
-        self.video_thread.set_circular_mask(self.mask)
-
     def start_video_thread(self):
         """Starts the video capture thread and connects its signals."""
         self.video_thread = videomodule.VideoThread(config.CAMERA_INDEX, mode='binary',
                                                     tracking=True)
-        self.video_thread.set_threshold(self.threshold_slider.value)
-        self.video_thread.set_minarea(self.minarea_slider.value)
-        self.video_thread.set_circular_mask(self.mask)
+        self.video_thread.set_threshold(BLACK_THRESHOLD)
+        self.video_thread.set_minarea(MIN_AREA)
+        self.video_thread.set_circular_mask(DEFAULT_MASK)
         self.video_thread.frame_processed.connect(self.update_image)
         self.video_thread.start()
 
@@ -206,15 +181,17 @@ class Task(QMainWindow):
             # FIXME: is the centroid point (x, y) or (row, col)?
             self.frame_data['centroid_x'].append(points[0][0])
             self.frame_data['centroid_y'].append(points[0][1])
-        self.video_widget.display_frame(frame, points, self.initzone, self.mask, contour=contour)
+        # Display frame without passing initzone/mask - widget will use its internal values
+        self.video_widget.display_frame(frame, points, contour=contour)
             
     def start_session(self):
         """
         Called automatically when SessionController.start() is called.
         """
         if not self.session_running:
-            # Set the session duration from the GUI parameter
-            session_duration = self.params['sessionDuration'].get_value()
+            # Get session duration from SessionInfo widget
+            session_duration = self.session_info.get_value('sessionDuration')            # Set the session duration from the GUI parameter
+            #session_duration = self.params['sessionDuration'].get_value()
             self.controller.set_session_duration(session_duration)
             self.session_running = True
 
