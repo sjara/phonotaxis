@@ -161,7 +161,7 @@ class Container(dict):
         """
         dataParent = 'resultsData'      # Parameters from each trial
         itemsParent = 'resultsLabels'   # Items in menu parameters
-        sessionParent = 'sessionData'   # Parameters for the whole session
+        #sessionParent = 'sessionData'   # Parameters for the whole session
         # descriptionAttr = 'Description'
         # FIXME: the contents of description should not be the label, but the
         #        description of the parameter (including its units)
@@ -169,10 +169,10 @@ class Container(dict):
         menuItemsGroup = h5file.require_group(itemsParent)
         sessionDataGroup = h5file.require_group(sessionParent)
 
-        # -- Append date/time and hostname --
-        dset = sessionDataGroup.create_dataset('hostname', data=socket.gethostname())
-        dateAndTime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-        dset = sessionDataGroup.create_dataset('date', data=dateAndTime)
+        # # -- Append date/time and hostname --
+        # dset = sessionDataGroup.create_dataset('hostname', data=socket.gethostname())
+        # dateAndTime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        # dset = sessionDataGroup.create_dataset('date', data=dateAndTime)
 
         # -- Append all other parameters --
         for key, item in self.items():
