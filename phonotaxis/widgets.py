@@ -4,11 +4,127 @@ Useful widgets for phonotaxis applications
 
 # import cv2
 # import numpy as np
+import socket
+import time
 from typing import Dict, Optional
 from PyQt6.QtWidgets import QLabel, QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QSlider
-from PyQt6.QtWidgets import QGroupBox, QGridLayout, QDoubleSpinBox
+from PyQt6.QtWidgets import QGroupBox, QGridLayout, QDoubleSpinBox, QCheckBox
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPointF
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QPolygonF
+from phonotaxis import gui
+
+
+class SessionInfo(QWidget):
+    """
+    Widget for session information parameters.
+    
+    Contains standard session parameters: hostname, subject, trainer, maxSessionDuration, 
+    and maxTrials. Provides a consistent interface for displaying and saving session info 
+    across tasks.
+    
+    Usage:
+        session_info = SessionInfo()
+        layout.addWidget(session_info)
+        
+        # Later, save to HDF5 file
+        session_info.append_to_file(h5file)
+    """
+    
+    def __init__(self, parent=None):
+        """
+        Initialize SessionInfo widget with default parameters.
+        
+        Args:
+            parent: Parent widget (optional)
+        """
+        super().__init__(parent)
+        
+        # Create parameter container
+        self.params = gui.Container()
+        
+        # Define session parameters (without history)
+        self.params['subject'] = gui.StringParam('Subject', value='', 
+                                                 group='Session info')
+        self.params['trainer'] = gui.StringParam('Trainer', value='', 
+                                                 group='Session info')
+        self.params['hostname'] = gui.StringParam('Hostname', value=socket.gethostname(), 
+                                                  group='Session info', enabled=False)
+        self.params['maxSessionDuration'] = gui.NumericParam('Max duration (s)', value=float('inf'), 
+                                                          units='s', history=False,
+                                                          group='Session info')
+        self.params['maxTrials'] = gui.NumericParam('Max trials', value=float('inf'), 
+                                                     units='trials', decimals=0, history=False,
+                                                     group='Session info')
+        
+        # Create layout with the group
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self.groupBox = self.params.layout_group('Session info')
+        self._layout.addWidget(self.groupBox)
+    
+    def get_value(self, param_name):
+        """
+        Get the value of a specific parameter.
+        
+        Args:
+            param_name: Name of the parameter ('hostname', 'subject', 'trainer', 
+                       'maxSessionDuration', or 'maxTrials')
+        
+        Returns:
+            The current value of the parameter
+        """
+        if param_name not in self.params:
+            raise KeyError(f"Parameter '{param_name}' not found in SessionInfo")
+        return self.params[param_name].get_value()
+    
+    def set_value(self, param_name, value):
+        """
+        Set the value of a specific parameter.
+        
+        Args:
+            param_name: Name of the parameter
+            value: New value for the parameter
+        """
+        if param_name not in self.params:
+            raise KeyError(f"Parameter '{param_name}' not found in SessionInfo")
+        self.params[param_name].set_value(value)
+    
+    def set_values(self, values_dict):
+        """
+        Set multiple parameter values at once.
+        
+        Args:
+            values_dict: Dictionary with parameter names as keys and their values
+        """
+        self.params.set_values(values_dict)
+    
+    def append_to_file(self, h5file):
+        """
+        Append session info to an HDF5 file.
+        
+        Saves all session parameters to the 'sessionData' group in the HDF5 file.
+        Unlike Container.append_to_file(), this method does not save history,
+        as session parameters should remain constant throughout a session.
+        
+        Args:
+            h5file: Open HDF5 file object (h5py.File)
+        """
+        sessionDataGroup = h5file.require_group('sessionData')
+        
+        # Append date/time
+        dateAndTime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        dset = sessionDataGroup.create_dataset('date', data=dateAndTime)
+        
+        # Append all session parameters (including hostname)
+        for key, item in self.params.items():
+            if item.get_type() == 'string':
+                dset = sessionDataGroup.create_dataset(key, data=item.get_value())
+            else:
+                dset = sessionDataGroup.create_dataset(key, data=item.get_value())
+            dset.attrs['Description'] = item.get_label()
+            if item.get_type() == 'numeric':
+                dset.attrs['Units'] = item.get_units()
+    
 
 class StatusWidget(QLabel):
     def __init__(self):
@@ -59,6 +175,7 @@ class SliderWidget(QWidget):
         self.label = label
         
         self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for compact layout
         # Label to display the current slider value
         self.value_label = QLabel(f"{self.label}: {self.value}")
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -90,10 +207,23 @@ CENTROID_COLOR = (239, 41, 41)  # RGB for Tango Scarlet Red
 CONTOUR_COLOR = (138, 226, 52)  # RGB for Tango Chameleon green
 
 class VideoWidget(QWidget):
-    def __init__(self):
+    """
+    Widget for displaying video feed with optional control sliders.
+    
+    Args:
+        controls (bool): If True, display control sliders for threshold, min area, 
+                        initzone radius, and mask radius. Default is False.
+        threshold (int): Initial threshold value (0-255). Default is 50.
+        minarea (int): Initial minimum area value. Default is 4000.
+        initzone_radius (int): Initial initiation zone radius. Default is 80.
+        mask_radius (int): Initial mask radius. Default is 240.
+    """
+    def __init__(self, controls=False, threshold=50, minarea=4000, 
+                 initzone_radius=80, mask_radius=240):
         super().__init__()
         #self.setGeometry(100, 100, 800, 600)
         self.layout = QVBoxLayout(self)
+        self.layout.setSpacing(2)  # Reduce spacing between widgets
         self.video_label = QLabel("Placeholder for video")  # ("Waiting for camera feed...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: #222; color: #fff;" +
@@ -106,20 +236,181 @@ class VideoWidget(QWidget):
         self.first_point_trail = []
         self.max_trail_length = 20
         
-        # Contour display settings
+        # Display settings
         self.show_contours = False  # Whether to display contours
+        self.show_trail = False  # Whether to display point trail
+        
+        # Video thread reference (for controls)
+        self.video_thread = None
+        self.video_interface = None
+        
+        # Control widgets (optional)
+        self.controls_visible = controls
+        self.contour_checkbox = None
+        self.mode_checkbox = None
+        self.trail_checkbox = None
+        self.threshold_slider = None
+        self.minarea_slider = None
+        self.initzone_radius_slider = None
+        self.mask_radius_slider = None
+        
+        # Store initial values
+        self._threshold = threshold
+        self._minarea = minarea
+        self._initzone_radius = initzone_radius
+        self._mask_radius = mask_radius
+        
+        if controls:
+            self._setup_controls()
+    
+    def _setup_controls(self):
+        """Create and add control widgets to the widget."""
+        # Checkboxes row
+        checkbox_layout = QHBoxLayout()
+        
+        checkbox_layout.addStretch()
+        self.contour_checkbox = QCheckBox("Show contour")
+        self.contour_checkbox.setChecked(self.show_contours)
+        self.contour_checkbox.setStyleSheet("font-size: 12px; padding: 4px;")
+        self.contour_checkbox.stateChanged.connect(self._toggle_contour)
+        checkbox_layout.addWidget(self.contour_checkbox)
+        
+        checkbox_layout.addSpacing(20)  # Add horizontal spacing
+        
+        self.trail_checkbox = QCheckBox("Show trail")
+        self.trail_checkbox.setChecked(self.show_trail)
+        self.trail_checkbox.setStyleSheet("font-size: 12px; padding: 4px;")
+        self.trail_checkbox.stateChanged.connect(self._toggle_trail)
+        checkbox_layout.addWidget(self.trail_checkbox)
+        
+        checkbox_layout.addSpacing(20)  # Add horizontal spacing
+        
+        self.mode_checkbox = QCheckBox("Binary/Masked mode")
+        self.mode_checkbox.setChecked(True)  # Default to binary mode
+        self.mode_checkbox.setStyleSheet("font-size: 12px; padding: 4px;")
+        self.mode_checkbox.stateChanged.connect(self._toggle_mode)
+        checkbox_layout.addWidget(self.mode_checkbox)
+        
+        #checkbox_layout.addStretch()
+        self.layout.addLayout(checkbox_layout)
+        
+        # Sliders
+        self.threshold_slider = SliderWidget(maxvalue=255, label="Threshold", 
+                                            value=self._threshold)
+        self.minarea_slider = SliderWidget(maxvalue=16000, label="Min area", 
+                                          value=self._minarea)
+        self.initzone_radius_slider = SliderWidget(maxvalue=300, label="IZ radius", 
+                                                   value=self._initzone_radius)
+        self.mask_radius_slider = SliderWidget(maxvalue=300, label="Mask radius", 
+                                              value=self._mask_radius)
+        
+        self.layout.addWidget(self.threshold_slider)
+        self.layout.addWidget(self.minarea_slider)
+        self.layout.addWidget(self.initzone_radius_slider)
+        self.layout.addWidget(self.mask_radius_slider)
+    
+    def connect_video_thread(self, video_thread):
+        """
+        Connect to a video thread for control.
+        
+        Args:
+            video_thread: VideoThread instance to control
+        """
+        self.video_thread = video_thread
+        
+        # Extract mask from video thread if available
+        if hasattr(video_thread, 'mask_coords') and video_thread.mask_coords is not None:
+            self._mask = list(video_thread.mask_coords)
+        
+        # Update mode checkbox to reflect video thread's current mode
+        if self.controls_visible and self.mode_checkbox is not None:
+            if hasattr(video_thread, 'mode'):
+                is_binary = (video_thread.mode == 'binary')
+                self.mode_checkbox.setChecked(is_binary)
+        
+        # Connect slider signals if controls are visible
+        if self.controls_visible and video_thread is not None:
+            self.threshold_slider.value_changed.connect(self._update_threshold)
+            self.minarea_slider.value_changed.connect(self._update_minarea)
+            self.mask_radius_slider.value_changed.connect(self._update_mask_radius)
+    
+    def connect_video_interface(self, video_interface, zone_name='IZ'):
+        """
+        Connect to a video interface for zone updates.
+        
+        Args:
+            video_interface: VideoInterface instance for zone updates
+            zone_name: Name of the zone to control with the initzone radius slider (default: 'IZ')
+        """
+        self.video_interface = video_interface
+        self._zone_name = zone_name
+        
+        # Extract initzone from video interface if the zone exists
+        if hasattr(video_interface, 'zones') and zone_name in video_interface.zones:
+            zone_info = video_interface.zones[zone_name]
+            if zone_info['type'] == 'circular':
+                self._initzone = list(zone_info['coords'])
+        
+        # Connect initzone slider signal if controls are visible
+        if self.controls_visible and video_interface is not None:
+            self.initzone_radius_slider.value_changed.connect(self._update_initzone_radius)
+    
+    def _update_threshold(self, value):
+        """Update video thread threshold."""
+        if self.video_thread:
+            self.video_thread.set_threshold(value)
+    
+    def _update_minarea(self, value):
+        """Update video thread minimum area."""
+        if self.video_thread:
+            self.video_thread.set_minarea(value)
+    
+    def _update_initzone_radius(self, radius):
+        """Update initzone radius in video thread and interface."""
+        if hasattr(self, '_initzone'):
+            self._initzone[2] = radius
+            if self.video_interface and hasattr(self, '_zone_name'):
+                self.video_interface.add_zone(self._zone_name, 'circular', tuple(self._initzone))
+    
+    def _update_mask_radius(self, radius):
+        """Update mask radius in video thread."""
+        if hasattr(self, '_mask'):
+            self._mask[2] = radius
+            if self.video_thread:
+                self.video_thread.set_circular_mask(self._mask)
+    
+    def _toggle_contour(self, state):
+        """Toggle contour display on/off."""
+        self.show_contours = (state == Qt.CheckState.Checked.value)
+    
+    def _toggle_trail(self, state):
+        """Toggle trail display on/off."""
+        self.show_trail = (state == Qt.CheckState.Checked.value)
+    
+    def _toggle_mode(self, state):
+        """Toggle between binary and grayscale mode."""
+        if self.video_thread:
+            new_mode = 'binary' if state == Qt.CheckState.Checked.value else 'grayscale'
+            self.video_thread.mode = new_mode
 
-    def display_frame(self, frame, points=(), initzone=(), mask=(), show_trail=True, contour=None):
+    def display_frame(self, frame, points=(), initzone=None, mask=None, contour=None):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
         Args:
             frame (np.ndarray): The grayscale frame to display.
             points (tuple): Tuple of tuples containing the centroid coordinates (x, y).
-            initzone (tuple): Tuple containing (x, y, radius) of initiation zone
-            mask (tuple): Tuple containing (x, y, radius) of mask
-            show_trail (bool): If True, shows the trail of recent centroids. If False, shows only the latest point.
+            initzone (tuple): Tuple containing (x, y, radius) of initiation zone. 
+                            If None, uses internal _initzone if available.
+            mask (tuple): Tuple containing (x, y, radius) of mask.
+                         If None, uses internal _mask if available.
             contour (np.ndarray): OpenCV contour array to display (optional)
         """
+        # Use internal values if parameters are None
+        if initzone is None and hasattr(self, '_initzone'):
+            initzone = self._initzone
+        if mask is None and hasattr(self, '_mask'):
+            mask = self._mask
+        
         h, w = frame.shape  # Grayscale frames have only height and width
         bytes_per_line = w
         img_format = QImage.Format.Format_Grayscale8
@@ -128,9 +419,9 @@ class VideoWidget(QWidget):
         pixmap = QPixmap.fromImage(p)
         #print(roi[2]); print('------------------------')
         #print(points); print('------------------------')
-        if len(initzone):
+        if initzone is not None and len(initzone):
             self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=IZ_COLOR) # SkyBlue
-        if len(mask):
+        if mask is not None and len(mask):
             self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240))
             #self.add_rectangular_roi(pixmap, mask)
         
@@ -145,8 +436,8 @@ class VideoWidget(QWidget):
             # Clear trail if no valid point is detected
             self.clear_first_point_trail()
         
-        # Draw centroids based on show_trail parameter
-        if show_trail:
+        # Draw centroids based on internal show_trail setting
+        if self.show_trail:
             # Draw the first point trail
             self.add_first_point_trail(pixmap)
         else:
