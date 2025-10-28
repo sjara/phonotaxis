@@ -289,16 +289,17 @@ class Sound():
         - A chord with ntones=1 will create a tone at midfreq/factor, not at midfreq.
 
         """
-        freqEachComp = np.logspace(np.log10(midfreq/factor),
-                                   np.log10(midfreq*factor),
-                                   ntones)
-        phase = randomGen.uniform(-np.pi, np.pi, ntones)
-        chordAmp = amp/np.sqrt(ntones)
-        for indcomp, freqThisComp in enumerate(freqEachComp):
-            self.wave += chordAmp*np.sin(2*np.pi * freqThisComp * self.tvec + phase[indcomp])
-        self.components += [{'type':'chord', 'midfreq':midfreq, 'factor':factor,
-                             'ntones':ntones, 'amp':amp}]
-        return self.tvec, self.wave
+        pass
+        # freqEachComp = np.logspace(np.log10(midfreq/factor),
+        #                            np.log10(midfreq*factor),
+        #                            ntones)
+        # phase = randomGen.uniform(-np.pi, np.pi, ntones)
+        # chordAmp = amp/np.sqrt(ntones)
+        # for indcomp, freqThisComp in enumerate(freqEachComp):
+        #     self.wave += chordAmp*np.sin(2*np.pi * freqThisComp * self.tvec + phase[indcomp])
+        # self.components += [{'type':'chord', 'midfreq':midfreq, 'factor':factor,
+        #                      'ntones':ntones, 'amp':amp}]
+        # return self.tvec, self.wave
     
     def add_from_file(self, soundfile, amp=1, channel='all', loop=False):
         """
