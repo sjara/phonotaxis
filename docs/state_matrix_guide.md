@@ -330,14 +330,14 @@ Looking at state `wait_for_poke [1]`:
 - **Rin → 4**: When right poke detected, go to `reward_on_R`
 - **Tup → 1**: Timer never expires (inf), but would stay here if it did
 - **Timer: inf**: Never times out
-- **Outputs: 00--**: Both valves OFF, other outputs unchanged
+- **Outputs: 00**: Both valves OFF
 - **integerOut: 0**: No numeric output
 
 Looking at state `reward_on_L [3]`:
 - **All events → self except Tup**: Ignores all pokes/zone events while delivering reward
 - **Tup → 5**: After timer expires, go to `reward_off`
 - **Timer: 0.10**: Lasts 0.1 seconds
-- **Outputs: 10--**: Left valve ON, right valve OFF
+- **Outputs: 10**: Left valve ON, right valve OFF
 - **integerOut: 2**: Triggers sound ID 2
 
 ### The END State
