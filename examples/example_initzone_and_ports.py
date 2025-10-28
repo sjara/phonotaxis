@@ -38,7 +38,7 @@ ARDUINO_INPUTS = list(config.INPUT_PINS.keys())  # Inputs from Arduino/emulator
 INPUTS = VIDEO_INPUTS + ARDUINO_INPUTS  # Combined inputs for state matrix
 OUTPUTS = list(config.OUTPUT_PINS.keys())
 
-class Task(QMainWindow):
+class Paradigm(QMainWindow):
     def __init__(self):
         super().__init__()
         self.name = 'example'  # Paradigm name
@@ -58,13 +58,9 @@ class Task(QMainWindow):
                                                 minarea=MIN_AREA, initzone_radius=DEFAULT_INITZONE[2],
                                                 mask_radius=DEFAULT_MASK[2])
 
-        # -- Connect signals from GUI --
-        #self.controller.status_update.connect(self.on_timer_tick)
+        # -- Connect signals from controller --
         self.controller.session_started.connect(self.start_session)
-        #self.controller.session_stopped.connect(self.stop_session)
         self.controller.prepare_next_trial.connect(self.prepare_next_trial)
-
-        # -- Connect signals to messenger
         self.controller.log_message.connect(self.messagebar.collect)
 
         # -- Add container for storing results from each trial --
@@ -73,32 +69,26 @@ class Task(QMainWindow):
         self.results.labels['choice'] = bidict({'left':0, 'right':1, 'none':2})
         self.results['choice'] = np.empty(maxNtrials, dtype=int)
 
-        # -- NEW: Use SessionInfo widget instead of manual parameter creation --
+        # -- Add graphical parameters -
         self.session_info = widgets.SessionInfo()
-        # You can set custom default values if needed:
         self.session_info.set_values({
             'subject': 'test000',
             'trainer': '',
-            'maxSessionDuration': 200,
-            'maxTrials': 1000
+            'maxSessionDuration': float('inf'), # In seconds
+            'maxTrials': float('inf')
         })
 
-        # self.params = gui.Container()
-        # self.params['subject'] = gui.StringParam('Subject', value='test000', group='Session info')
-        # self.params['trainer'] = gui.StringParam('Trainer', value='', group='Session info')
-        # self.params['sessionDuration'] = gui.NumericParam('Duration', value=200, units='s',
-        #                                                 group='Session info')
-        # self.sessionInfo = self.params.layout_group('Session info')
-
-        # -- Other task parameters (not session info) --
         self.params = gui.Container()
         self.params['soundDuration'] = gui.NumericParam('Sound duration', value=0.4, units='s',
-                                                        group='Other params')
+                                                        group='Sound params')
+        self.params['soundAmplitude'] = gui.NumericParam('Sound amplitude', value=0.5, units='0-1',
+                                                        group='Sound params')
+        self.sound_params = self.params.layout_group('Sound params')  
         self.params['valveDuration'] = gui.NumericParam('Valve duration', value=0.1, units='s', 
-                                                        group='Other params')
-        self.other_params = self.params.layout_group('Other params')  
+                                                        group='Valve params')
+        self.valve_params = self.params.layout_group('Valve params')  
 
-        # --- GUI layout ---
+        # -- GUI layout --
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QHBoxLayout(self.central_widget)
@@ -112,7 +102,8 @@ class Task(QMainWindow):
 
         col2.addWidget(self.controller.gui)
         col2.addWidget(self.session_info)
-        col2.addWidget(self.other_params)
+        col2.addWidget(self.valve_params)
+        col2.addWidget(self.sound_params)
         col2.addStretch()
 
         # -- Initialize video --
@@ -130,7 +121,7 @@ class Task(QMainWindow):
         self.video_interface.connect_state_machine(self.controller.state_machine)
         self.messagebar.collect("Video interface initialized.")
         
-        # Connect video widget controls to video thread and video interface
+        # -- Connect video widget controls to video thread and video interface --
         self.video_widget.connect_video_thread(self.video_thread)
         self.video_widget.connect_video_interface(self.video_interface, zone_name='IZ')
 
@@ -181,30 +172,29 @@ class Task(QMainWindow):
             # FIXME: is the centroid point (x, y) or (row, col)?
             self.frame_data['centroid_x'].append(points[0][0])
             self.frame_data['centroid_y'].append(points[0][1])
-        # Display frame without passing initzone/mask - widget will use its internal values
         self.video_widget.display_frame(frame, points, contour=contour)
             
     def start_session(self):
-        """
-        Called automatically when SessionController.start() is called.
-        """
         if not self.session_running:
-            # Get session duration from SessionInfo widget
-            session_duration = self.session_info.get_value('sessionDuration')            # Set the session duration from the GUI parameter
-            #session_duration = self.params['sessionDuration'].get_value()
+            session_duration = self.session_info.get_value('maxSessionDuration')
             self.controller.set_session_duration(session_duration)
             self.session_running = True
+
+    def stop_session(self):
+        if self.session_running:
+            self.session_running = False
 
     def prepare_sounds(self):
         """Prepare possible sounds"""
         duration = self.params['soundDuration'].get_value()
+        amplitude = self.params['soundAmplitude'].get_value()
         soundL = soundmodule.Sound(duration=duration, srate=SAMPLING_RATE, nchannels=2)
-        soundL.add_tone(440, duration, channel=0)
+        soundL.add_tone(440, amplitude, channel=0)
         soundR = soundmodule.Sound(duration=duration, srate=SAMPLING_RATE, nchannels=2)
-        soundR.add_tone(350, duration, channel=1)
+        soundR.add_tone(350, amplitude, channel=1)
         soundIZ = soundmodule.Sound(duration=duration, srate=SAMPLING_RATE, nchannels=2)
-        soundIZ.add_tone(294, duration, channel='all')
-        
+        soundIZ.add_tone(294, amplitude, channel='all')
+
         self.sound_player.set_sound(SOUND_ID_LEFT, soundL)
         self.sound_player.set_sound(SOUND_ID_RIGHT, soundR)
         self.sound_player.set_sound(SOUND_ID_INITZONE, soundIZ)
@@ -214,7 +204,7 @@ class Task(QMainWindow):
         if next_trial > 0:
             self.params.update_history(next_trial-1)
             self.process_results(next_trial-1)
-            #print(self.controller.get_events_for_trial(use_names=True))
+            print(self.controller.get_events_one_trial(next_trial-1, use_names=True))
 
         self.prepare_sounds()
 
@@ -253,4 +243,4 @@ class Task(QMainWindow):
 
 
 if __name__ == "__main__":
-    (app, paradigm) = gui.create_app(Task)
+    (app, paradigm) = gui.create_app(Paradigm)

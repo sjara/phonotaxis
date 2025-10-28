@@ -326,7 +326,21 @@ class SessionController(QtCore.QObject):
         dframe['next_state_str'] = ststr
         return dframe
 
-    def get_events_one_trial(self, trial_id: int) -> np.ndarray:
+    def get_events_one_trial(self, trial_id: int, use_names=False) -> pd.DataFrame:
+        """
+        Get events for specific trial.
+        
+        Args:
+            trial_id: Trial number
+            use_names: Whether to include string names for events and states
+        Returns:
+            DataFrame with trial events
+        """
+        dframe = self.get_events(use_names=use_names)
+        trial_events = dframe[dframe['trial'] == trial_id].reset_index(drop=False)
+        return trial_events
+
+    def OLD_get_events_one_trial(self, trial_id: int) -> np.ndarray:
         """
         Get events for specific trial.
         
