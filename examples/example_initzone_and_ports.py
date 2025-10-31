@@ -188,10 +188,10 @@ class Paradigm(QMainWindow):
             self.session_running = True
 
     def stop_session(self):
-        print(self.controller.get_events(use_names=True))
+        # print(self.controller.get_events(use_names=True))
         if self.session_running:
             self.session_running = False
-            self.save_to_file()
+            # self.save_to_file()  # Save the data when session stops
 
     def prepare_sounds(self):
         """Prepare possible sounds"""
