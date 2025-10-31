@@ -154,10 +154,12 @@ class Container(dict):
                 print("There is no '{0}' in {1}".format(dictname, filename))
                 raise
 
-    def append_to_file(self, h5file, currentTrial):
+    def append_to_file(self, h5file):
         """
         Append parameters' history to an HDF5 file.
-        It truncates data to the trial before currentTrial, because currentTrial has not ended.
+        
+        Saves all parameter history that has been recorded via update_history().
+        Only completed trials (those for which update_history() was called) are saved.
         """
         dataParent = 'resultsData'      # Parameters from each trial
         itemsParent = 'resultsLabels'   # Items in menu parameters
@@ -167,7 +169,7 @@ class Container(dict):
         #        description of the parameter (including its units)
         trialDataGroup = h5file.require_group(dataParent)
         menuItemsGroup = h5file.require_group(itemsParent)
-        sessionDataGroup = h5file.require_group(sessionParent)
+        #sessionDataGroup = h5file.require_group(sessionParent)
 
         # # -- Append date/time and hostname --
         # dset = sessionDataGroup.create_dataset('hostname', data=socket.gethostname())
@@ -181,7 +183,8 @@ class Container(dict):
                 if key not in self.history:
                     raise ValueError('No history was recorded for "{0}". '.format(key) +
                                      'Did you use paramgui.Container.update_history() correctly?')
-                dset = trialDataGroup.create_dataset(key, data=self.history[key][:currentTrial])
+                # Save all recorded history (only completed trials have been recorded)
+                dset = trialDataGroup.create_dataset(key, data=self.history[key])
                 dset.attrs['Description'] = item.get_label()
                 if item.get_type() == 'numeric':
                     dset.attrs['Units'] = item.get_units()
@@ -193,12 +196,13 @@ class Container(dict):
                     utils.append_dict_to_hdf5(menuItemsGroup, key, menuDict)
                     dset.attrs['Description'] = '{} menu items'.format(item.get_label())
             else:  # -- Store parameters without history (Session parameters) --
-                if item.get_type() == 'string':
-                    # dset = sessionDataGroup.create_dataset(key, data=np.str_(item.get_value()))
-                    dset = sessionDataGroup.create_dataset(key, data=item.get_value())
-                else:
-                    dset = trialDataGroup.create_dataset(key, data=item.get_value())
-                dset.attrs['Description'] = item.get_label()
+                raise NotImplementedError
+                # if item.get_type() == 'string':
+                #     # dset = sessionDataGroup.create_dataset(key, data=np.str_(item.get_value()))
+                #     dset = sessionDataGroup.create_dataset(key, data=item.get_value())
+                # else:
+                #     dset = trialDataGroup.create_dataset(key, data=item.get_value())
+                # dset.attrs['Description'] = item.get_label()
 
 
 class ParamGroupLayout(QGridLayout):

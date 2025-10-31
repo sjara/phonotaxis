@@ -89,24 +89,37 @@ class EnumContainer(dict):
         super().__init__()
         self.labels = dict()
 
-    def append_to_file(self, h5_file: h5py.File, current_trial: int) -> h5py.Dataset:
+    def append_to_file(self, h5_file: h5py.File) -> h5py.Dataset:
         """
         Append data in container to an open HDF5 file.
         
+        Saves all data that has been added to the container. Only add data
+        for completed trials to ensure incomplete trials are not saved.
+        
         Args:
             h5_file: Open HDF5 file object.
-            current_trial: Current trial number (must be >= 1).
             
         Raises:
-            UserWarning: If current_trial < 1.
+            UserWarning: If container is empty (no data to save).
         """
-        if current_trial < 1:
-            raise UserWarning('WARNING: No trials have been completed or ' +
-                              'current_trial not updated.')
+        if len(self) == 0:
+            raise UserWarning('WARNING: Container is empty. No data to save.')
+        
+        # Check if any items have data
+        has_data = False
+        for key, item in self.items():
+            if len(item) > 0:
+                has_data = True
+                break
+        
+        if not has_data:
+            raise UserWarning('WARNING: No trials have been completed or container not updated.')
+            
         results_data_group = h5_file.require_group('resultsData')
         results_labels_group = h5_file.require_group('resultsLabels')
         for key, item in self.items():
-            dset = results_data_group.create_dataset(key, data=item[:current_trial])
+            # Save all data in the container (only complete trials should be added)
+            dset = results_data_group.create_dataset(key, data=item)
         for key, item in self.labels.items():
             if not isinstance(item, (dict, bidict)):
                 raise TypeError(f"Label item '{key}' must be a dictionary, got {type(item)}")

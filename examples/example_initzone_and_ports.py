@@ -15,8 +15,11 @@ from phonotaxis import videomodule
 from phonotaxis import statematrix
 from phonotaxis import utils
 from phonotaxis import emulator
+from phonotaxis import savedata
 from phonotaxis import config
 
+# The paradigm name will be part of the saved data files
+PARADIGM_NAME = 'initzone_and_ports'
 
 # --- Sound settings ---
 SAMPLING_RATE = 44100
@@ -41,8 +44,7 @@ OUTPUTS = list(config.OUTPUT_PINS.keys())
 class Paradigm(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.name = 'example'  # Paradigm name
-        self.setWindowTitle("Water and sound on poke")
+        self.setWindowTitle(PARADIGM_NAME)
         #self.setGeometry(100, 100, 800, 600)
         self.setWindowIcon(gui.create_icon())
 
@@ -57,11 +59,15 @@ class Paradigm(QMainWindow):
         self.video_widget = widgets.VideoWidget(controls=True, threshold=BLACK_THRESHOLD,
                                                 minarea=MIN_AREA, initzone_radius=DEFAULT_INITZONE[2],
                                                 mask_radius=DEFAULT_MASK[2])
+        self.savedata_widget = savedata.SaveData(datadir=config.DATA_PATH)
 
-        # -- Connect signals from controller --
+        # -- Connect signals from controller and other widgets --
         self.controller.session_started.connect(self.start_session)
+        self.controller.session_stopped.connect(self.stop_session)
         self.controller.prepare_next_trial.connect(self.prepare_next_trial)
         self.controller.log_message.connect(self.messagebar.collect)
+        self.savedata_widget.button.clicked.connect(self.save_to_file)
+        self.savedata_widget.log_message.connect(self.messagebar.collect)
 
         # -- Add container for storing results from each trial --
         self.results = utils.EnumContainer()
@@ -102,6 +108,7 @@ class Paradigm(QMainWindow):
 
         col2.addWidget(self.controller.gui)
         col2.addWidget(self.session_info)
+        col2.addWidget(self.savedata_widget)
         col2.addWidget(self.valve_params)
         col2.addWidget(self.sound_params)
         col2.addStretch()
@@ -181,8 +188,10 @@ class Paradigm(QMainWindow):
             self.session_running = True
 
     def stop_session(self):
+        print(self.controller.get_events(use_names=True))
         if self.session_running:
             self.session_running = False
+            self.save_to_file()
 
     def prepare_sounds(self):
         """Prepare possible sounds"""
@@ -198,6 +207,21 @@ class Paradigm(QMainWindow):
         self.sound_player.set_sound(SOUND_ID_LEFT, soundL)
         self.sound_player.set_sound(SOUND_ID_RIGHT, soundR)
         self.sound_player.set_sound(SOUND_ID_INITZONE, soundIZ)
+
+    def save_to_file(self):
+        """
+        Save the session data.
+
+        Eventually, this will include timestamps, object positions, and subject responses.
+        """
+        subject = self.session_info.get_value('subject')
+        if self.controller.current_trial > 0:
+            containers = [self.params, self.controller, self.sm, self.results]
+            self.savedata_widget.to_file(containers,
+                                         subject=subject,
+                                         paradigm=PARADIGM_NAME)
+        else:
+            print('No trials have finished yet. No data was saved.')
 
     def prepare_next_trial(self, next_trial):
         """Process results from last trials and prepare the next one."""
