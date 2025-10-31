@@ -17,9 +17,10 @@ This design ensures:
 import time
 import numpy as np
 import pandas as pd
-import datetime
-from typing import List, Dict, Optional, Any, Union, Callable
-from PyQt6 import QtCore, QtWidgets, QtGui
+from typing import List, Optional, Any, Union, Callable
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer, Qt
+from PyQt6.QtWidgets import QWidget, QGroupBox, QLabel, QPushButton, QGridLayout
+from PyQt6.QtGui import QFont
 from phonotaxis.statemachine import StateMachine
 from phonotaxis.statematrix import StateMatrix
 from phonotaxis import config
@@ -33,7 +34,7 @@ BUTTON_COLORS = {
     'stop': '#FF4444'    # Red
 }
 
-class SessionController(QtCore.QObject):
+class SessionController(QObject):
     """
     Controller for behavioral session management.
     
@@ -48,7 +49,6 @@ class SessionController(QtCore.QObject):
         parent: Parent QObject
         polling_interval: Status update interval (seconds)
         create_gui: Whether to create GUI
-        session_duration: Maximum session duration in seconds (None for unlimited)
         debug: Enable debug output for state machine event processing (default False)
     
     Signals:
@@ -63,17 +63,16 @@ class SessionController(QtCore.QObject):
     """
     
     # Signals for GUI communication
-    status_update = QtCore.pyqtSignal(float, int, int, int)  # time, state, events, trial
-    prepare_next_trial = QtCore.pyqtSignal(int)  # next trial number
-    log_message = QtCore.pyqtSignal(str)  # log message
-    session_started = QtCore.pyqtSignal()  # session started successfully
-    session_stopped = QtCore.pyqtSignal()  # session stopped (manual or due to duration)
+    status_update = pyqtSignal(float, int, int, int)  # time, state, events, trial
+    prepare_next_trial = pyqtSignal(int)  # next trial number
+    log_message = pyqtSignal(str)  # log message
+    session_started = pyqtSignal()  # session started successfully
+    session_stopped = pyqtSignal()  # session stopped (manual or due to duration)
     
     def __init__(self, 
-                 parent: Optional[QtCore.QObject] = None,
+                 parent: Optional[QObject] = None,
                  polling_interval: float = DEFAULT_POLLING_INTERVAL,
                  create_gui: bool = True,
-                 session_duration: Optional[float] = None,
                  debug: bool = False) -> None:
         """
         Initialize the session controller.
@@ -82,14 +81,20 @@ class SessionController(QtCore.QObject):
             parent: Parent QObject
             polling_interval: Status update interval (seconds)
             create_gui: Whether to create GUI
-            session_duration: Maximum session duration in seconds (None for unlimited)
             debug: Enable debug output for state machine (default False)
+        
+        Raises:
+            ValueError: If polling_interval is not a positive number
         """
         super().__init__(parent)
         
+        # Validate parameters
+        if not isinstance(polling_interval, (int, float)) or polling_interval <= 0:
+            raise ValueError(f'polling_interval must be a positive number, got {polling_interval}')
+        
         # Configuration
         self.polling_interval = polling_interval
-        self.session_duration = session_duration
+        self.session_duration = None
         self.debug = debug
         
         # Trial structure
@@ -105,8 +110,6 @@ class SessionController(QtCore.QObject):
         self.current_trial = -1  # First trial will be 0
         
         # Event data storage
-        self.events_log: List[List[Union[float, int]]] = []
-        self.trial_end_indices: List[int] = []
         self.timestamps: List[float] = []
         self.events: List[int] = []
         self.next_states: List[int] = []
@@ -122,7 +125,7 @@ class SessionController(QtCore.QObject):
         self.state_machine.eventProcessed.connect(self._on_event_processed)
         
         # Timer for status updates
-        self.timer_tick = QtCore.QTimer(self)
+        self.timer_tick = QTimer(self)
         self.timer_tick.timeout.connect(self._on_timer_tick)
         
         # Create GUI if requested
@@ -136,7 +139,13 @@ class SessionController(QtCore.QObject):
         
         Args:
             state_matrix: StateMatrix object with complete state machine definition
+        
+        Raises:
+            TypeError: If state_matrix is not a StateMatrix instance
         """
+        if not isinstance(state_matrix, StateMatrix):
+            raise TypeError(f'Expected StateMatrix instance, got {type(state_matrix).__name__}')
+            
         try:
             self.state_matrix = state_matrix
             self.prepare_next_trial_states = [state_matrix.get_end_state_index()]
@@ -160,7 +169,14 @@ class SessionController(QtCore.QObject):
         
         Args:
             duration: Maximum session duration in seconds (None for unlimited)
+        
+        Raises:
+            ValueError: If duration is not None and not a positive number
         """
+        if duration is not None:
+            if not isinstance(duration, (int, float)) or duration <= 0:
+                raise ValueError(f'session_duration must be None or a positive number, got {duration}')
+        
         self.session_duration = duration
         if duration is not None:
             self.log_message.emit(f'Session duration set to {duration} seconds')
@@ -168,7 +184,19 @@ class SessionController(QtCore.QObject):
             self.log_message.emit('Session duration set to unlimited')
             
     def start(self) -> None:
-        """Start the session (single point of control)."""
+        """
+        Start the session (single point of control).
+        
+        Initializes time tracking, starts the status update timer, and emits
+        prepare_next_trial signal for the paradigm to prepare trial 0.
+        The paradigm should call ready_to_start_trial() when preparation is complete.
+        
+        Note:
+            Does nothing if session is already running (logs message).
+            
+        Raises:
+            Exception: Re-raises any exception after logging via log_message signal
+        """
         if self.is_running:
             self.log_message.emit('Session already running')
             return
@@ -184,13 +212,9 @@ class SessionController(QtCore.QObject):
             timer_interval_ms = int(self.polling_interval * 1000)
             self.timer_tick.start(timer_interval_ms)
             
-            # Prepare first trial
-            #self.ready_to_start_trial()
+            # Prepare first trial (paradigm will call ready_to_start_trial when ready)
+            self.preparing_next_trial = True
             self.prepare_next_trial.emit(self.current_trial + 1)
-
-            # Start state machine
-            #self.state_machine.start()
-            # State will be set to first user state (1) in ready_to_start_trial()
 
             self.log_message.emit('Session started')
             self._emit_status_update()
@@ -203,18 +227,27 @@ class SessionController(QtCore.QObject):
             raise
             
     def stop(self) -> None:
-        """Stop the session (single point of control)."""
+        """
+        Stop the session (single point of control).
+        
+        Stops the status timer, forces state machine to END state, stops the
+        state machine, and emits session_stopped signal for cleanup.
+        
+        Raises:
+            Exception: Re-raises any exception after logging via log_message signal
+        """
         try:
             # Stop timer
             self.timer_tick.stop()
+            
+            # Update session state BEFORE forcing state change
+            # This prevents _on_state_changed from triggering next trial preparation
+            self.is_running = False
             
             # Stop state machine
             end_state_index = self.state_matrix.get_end_state_index()
             self.state_machine.force_state(end_state_index)
             self.state_machine.stop()
-            
-            # Update session state
-            self.is_running = False
             
             self.log_message.emit('Session stopped')
             self._emit_status_update()
@@ -227,8 +260,18 @@ class SessionController(QtCore.QObject):
             raise
             
     def ready_to_start_trial(self) -> None:
-        """Signal that next trial is ready to start."""
-        if self.is_running:
+        """
+        Signal that next trial is ready to start.
+        
+        Called by the paradigm/task after preparing the trial in response to
+        the prepare_next_trial signal. Increments trial counter and forces
+        state machine to first user state (state 1).
+        
+        Note:
+            Only proceeds if session is running and preparing_next_trial flag is set.
+            This prevents race conditions from multiple calls.
+        """
+        if self.is_running and self.preparing_next_trial:
             self.current_trial += 1
             self.preparing_next_trial = False
             if len(self.state_matrix.states) > 1:
@@ -267,11 +310,8 @@ class SessionController(QtCore.QObject):
         # Calculate relative time
         relative_time = timestamp - self.start_time if self.start_time > 0 else 0.0
         
-        # Update event log
-        self.events_log.append([relative_time, event_index, next_state])
+        # Update event count and lists
         self.event_count += 1
-        
-        # Update event lists
         self.timestamps.append(relative_time)
         self.events.append(event_index)
         self.next_states.append(next_state)
@@ -280,7 +320,13 @@ class SessionController(QtCore.QObject):
         self._emit_status_update()
         
     def _on_timer_tick(self) -> None:
-        """Handle status timer - update current time and emit status."""
+        """
+        Handle status timer - update current time and emit status.
+        
+        Called periodically based on polling_interval. Updates current_time
+        and checks if session_duration has been reached. If duration limit
+        is reached, automatically stops the session.
+        """
         if self.is_running and self.start_time > 0:
             self.current_time = time.time() - self.start_time
             # Check if session duration has been reached
@@ -292,7 +338,12 @@ class SessionController(QtCore.QObject):
             self._emit_status_update()
             
     def _emit_status_update(self) -> None:
-        """Emit status update signal for GUI."""
+        """
+        Emit status update signal for GUI.
+        
+        Emits the status_update signal with current session state including
+        time, state index, event count, and trial number.
+        """
         self.status_update.emit(
             self.current_time,
             self.current_state,
@@ -303,6 +354,9 @@ class SessionController(QtCore.QObject):
     def get_events(self, use_names=False) -> pd.DataFrame:
         """
         Return DataFrame with all events.
+        
+        Args:
+            use_names: If True, include string names for events and states
         
         Returns:
             DataFrame with event data
@@ -317,7 +371,16 @@ class SessionController(QtCore.QObject):
             dframe = self._add_event_str_columns(dframe)
         return dframe
         
-    def _add_event_str_columns(self, dframe):
+    def _add_event_str_columns(self, dframe: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add string columns for event and state names to DataFrame.
+        
+        Args:
+            dframe: DataFrame with event data
+            
+        Returns:
+            DataFrame with added 'events_str' and 'next_state_str' columns
+        """
         evdict = self.state_matrix.events_dict.inverse
         stdict = self.state_matrix.get_states_dict().inverse
         evstr = [evdict[ev] for ev in self.events]
@@ -326,70 +389,40 @@ class SessionController(QtCore.QObject):
         dframe['next_state_str'] = ststr
         return dframe
 
-    def get_events_one_trial(self, trial_id: int, use_names=False) -> pd.DataFrame:
+    def get_events_one_trial(self, trial_id: int, use_names: bool = False) -> pd.DataFrame:
         """
         Get events for specific trial.
         
         Args:
-            trial_id: Trial number
-            use_names: Whether to include string names for events and states
+            trial_id: Trial number (0-indexed)
+            use_names: If True, include string names for events and states
+            
         Returns:
-            DataFrame with trial events
+            DataFrame containing only events from the specified trial
         """
         dframe = self.get_events(use_names=use_names)
-        trial_events = dframe[dframe['trial'] == trial_id].reset_index(drop=False)
+        trial_events = dframe[dframe['trial'] == trial_id]
         return trial_events
 
-    def OLD_get_events_one_trial(self, trial_id: int) -> np.ndarray:
-        """
-        Get events for specific trial.
-        
-        Args:
-            trial_id: Trial number
-            
-        Returns:
-            NumPy array with trial events
-        """
-        if trial_id < 0 or trial_id >= len(self.trial_end_indices):
-            return np.empty((0, 3), dtype=float)
-            
-        end_idx = self.trial_end_indices[trial_id]
-        start_idx = self.trial_end_indices[trial_id - 1] + 1 if trial_id > 0 else 0
-        
-        trial_events = self.events_log[start_idx:end_idx + 1]
-        return np.array(trial_events, dtype=float)
-        
-    # def get_current_status(self) -> Dict[str, Any]:
-    #     """
-    #     Get comprehensive status information.
-        
-    #     Returns:
-    #         Dictionary with current session status
-    #     """
-    #     return {
-    #         'is_running': self.is_running,
-    #         'server_time': self.current_time,
-    #         'current_state': self.current_state,
-    #         'current_trial': self.current_trial,
-    #         'event_count': self.event_count,
-    #         'preparing_next_trial': self.preparing_next_trial,
-    #         'n_completed_trials': len(self.trial_end_indices)
-    #     }
-
-    def append_to_file(self, h5file: Any, current_trial: Optional[int] = None) -> Any:
+    def append_to_file(self, h5file: Any) -> Any:
         """
         Save session data to HDF5 file.
         
+        Creates an '/events' group in the HDF5 file and saves all event data
+        as separate datasets: 'timestamp' (float), 'event' (int), 'next_state' (int),
+        and 'trial' (int).
+        
         Args:
-            h5file: Open HDF5 file handle
-            current_trial: Current trial number (ignored for compatibility)
+            h5file: Open HDF5 file handle (from h5py)
             
         Returns:
-            HDF5 group with events data
+            HDF5 group object containing the events datasets
+            
+        Raises:
+            UserWarning: If no trials have been started (current_trial < 0)
+            RuntimeError: If there's an error creating the HDF5 group or datasets
         """
-        
-        # if not self.trial_end_indices:
-        if self.current_trial < 1:
+        if self.current_trial < 0:
             raise UserWarning('No completed trials found. No events were saved.')
             
         try:
@@ -397,25 +430,23 @@ class SessionController(QtCore.QObject):
             events_df = self.get_events()
             for colname, vals in events_df.items():
                 events_group.create_dataset(colname, data=np.array(vals))
-            # if self.events_log:
-            #     events_array = np.array(self.events_log, dtype=float)
-            #     events_group.create_dataset('eventTime', data=events_array[:, 0])
-            #     events_group.create_dataset('eventCode', data=events_array[:, 1])
-            #     events_group.create_dataset('nextState', data=events_array[:, 2])
-            # else:
-            #     events_group.create_dataset('eventTime', data=np.array([], dtype=float))
-            #     events_group.create_dataset('eventCode', data=np.array([], dtype=int))
-            #     events_group.create_dataset('nextState', data=np.array([], dtype=int))
-                
-            # events_group.create_dataset('indexLastEventEachTrial', 
-            #                           data=np.array(self.trial_end_indices, dtype=int))
             return events_group
             
         except Exception as e:
             raise RuntimeError(f'Error saving events to file: {str(e)}')
             
     def cleanup(self) -> None:
-        """Clean up resources."""
+        """
+        Clean up resources and reset hardware outputs.
+        
+        Stops the session and resets all state machine outputs to False (off).
+        Should be called before closing the application to ensure hardware
+        is in a safe state.
+        
+        Note:
+            Catches and logs any exceptions during cleanup to prevent application
+            crashes during shutdown.
+        """
         try:
             self.stop()
             if self.state_machine:
@@ -429,7 +460,7 @@ class SessionController(QtCore.QObject):
             self.log_message.emit(f'Error during cleanup: {str(e)}')
 
 
-class ControllerGUI(QtWidgets.QGroupBox):
+class ControllerGUI(QGroupBox):
     """
     View component for the session controller (pure GUI).
     
@@ -441,7 +472,7 @@ class ControllerGUI(QtWidgets.QGroupBox):
     """
     
     def __init__(self, 
-                 parent: Optional[QtWidgets.QWidget] = None,
+                 parent: Optional[QWidget] = None,
                  controller: Optional[SessionController] = None,
                  min_width: int = 220) -> None:
         """
@@ -470,16 +501,24 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self._update_display(0.0, 0, 0, -1)  # Initial state
         
     def _setup_ui(self, min_width: int) -> None:
-        """Create and layout the user interface elements."""
+        """
+        Create and layout the user interface elements.
+        
+        Sets up status labels, control button, and grid layout for the
+        controller GUI widget.
+        
+        Args:
+            min_width: Minimum width in pixels for the widget
+        """
         self.setTitle('Session control')
         self.setMinimumWidth(min_width)
         
         # Status labels
-        self.time_label = QtWidgets.QLabel()
-        self.event_count_label = QtWidgets.QLabel()
-        self.trial_label = QtWidgets.QLabel()
-        self.last_event_label = QtWidgets.QLabel()
-        self.state_label = QtWidgets.QLabel()
+        self.time_label = QLabel()
+        self.event_count_label = QLabel()
+        self.trial_label = QLabel()
+        self.last_event_label = QLabel()
+        self.state_label = QLabel()
         
         # Set fixed widths for consistent layout
         label_fixed_width = 120
@@ -490,7 +529,7 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self.state_label.setFixedWidth(2*label_fixed_width)
         
         # Left-align all labels
-        alignment = QtCore.Qt.AlignmentFlag.AlignLeft
+        alignment = Qt.AlignmentFlag.AlignLeft
         self.time_label.setAlignment(alignment)
         self.event_count_label.setAlignment(alignment)
         self.trial_label.setAlignment(alignment)
@@ -498,18 +537,18 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self.state_label.setAlignment(alignment)
 
         # Control button
-        self.start_stop_button = QtWidgets.QPushButton('')
+        self.start_stop_button = QPushButton('')
         self.start_stop_button.setCheckable(False)
         self.start_stop_button.setMinimumHeight(80)
         
         # Style the button
-        button_font = QtGui.QFont()
+        button_font = QFont()
         button_font.setPointSize(12)
         button_font.setBold(True)
         self.start_stop_button.setFont(button_font)
         
         # Layout - Three rows of status information
-        layout = QtWidgets.QGridLayout()
+        layout = QGridLayout()
         layout.addWidget(self.time_label, 0, 0)
         layout.addWidget(self.trial_label, 0, 1)
         layout.addWidget(self.last_event_label, 1, 0)
@@ -523,7 +562,13 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self._set_stopped_appearance()
         
     def _connect_signals(self) -> None:
-        """Connect signals between GUI and controller."""
+        """
+        Connect signals between GUI and controller.
+        
+        Connects button clicks to start/stop handler and connects controller
+        signals (status_update, session_started, session_stopped) to GUI
+        update methods.
+        """
         # Button click
         self.start_stop_button.clicked.connect(self._on_start_stop_clicked)
         
@@ -536,7 +581,12 @@ class ControllerGUI(QtWidgets.QGroupBox):
             self.controller.session_stopped.connect(self._set_stopped_appearance)
             
     def _on_start_stop_clicked(self) -> None:
-        """Handle start/stop button clicks."""
+        """
+        Handle start/stop button clicks.
+        
+        Calls controller.stop() if running, controller.start() if stopped.
+        Does nothing if no controller is connected.
+        """
         if not self.controller:
             return
             
@@ -546,7 +596,11 @@ class ControllerGUI(QtWidgets.QGroupBox):
             self.controller.start()
             
     def _set_running_appearance(self) -> None:
-        """Set GUI appearance for running state."""
+        """
+        Set GUI appearance for running state.
+        
+        Changes button to red 'STOP' appearance and updates internal state flag.
+        """
         self.start_stop_button.setText('STOP')
         self.start_stop_button.setStyleSheet(
             f'QPushButton {{ background-color: {BUTTON_COLORS["stop"]}; '
@@ -555,15 +609,19 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self.is_running = True
         
     def _set_stopped_appearance(self) -> None:
-        """Set GUI appearance for stopped state."""
+        """
+        Set GUI appearance for stopped state.
+        
+        Changes button to green 'START' appearance and updates internal state flag.
+        """
         self.start_stop_button.setText('START')
         self.start_stop_button.setStyleSheet(
             f'QPushButton {{ background-color: {BUTTON_COLORS["start"]}; '
             f'color: white; border: 2px solid #333; border-radius: 5px; }}'
         )
         self.is_running = False
-        
-    @QtCore.pyqtSlot(float, int, int, int)
+
+    @pyqtSlot(float, int, int, int)
     def _update_display(self, 
                        server_time: float, 
                        current_state: int, 
@@ -572,11 +630,15 @@ class ControllerGUI(QtWidgets.QGroupBox):
         """
         Update the status display.
         
+        Updates all status labels with current session information including
+        time, state (with name if available), event count, last event name,
+        and trial number.
+        
         Args:
-            server_time: Current time from session
+            server_time: Current session time in seconds
             current_state: Current state index
-            event_count: Total number of events
-            current_trial: Current trial number
+            event_count: Total number of events processed
+            current_trial: Current trial number (-1 if no trials started)
         """
         self.time_label.setText(self._time_format.format(server_time))
         
@@ -590,7 +652,7 @@ class ControllerGUI(QtWidgets.QGroupBox):
         self.event_count_label.setText(self._event_format.format(event_count))
         
         # Get last event name if available
-        if (self.controller and self.controller.events and 
+        if (self.controller and len(self.controller.events) > 0 and 
             self.controller.state_matrix and self.controller.state_matrix.events_dict):
             last_event_idx = self.controller.events[-1]
             if last_event_idx in self.controller.state_matrix.events_dict.inverse:
