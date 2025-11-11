@@ -286,11 +286,15 @@ class StateMachine(QtCore.QObject):
         
         Integer outputs are emitted via the integerOutput signal when entering
         a state. This can be used to trigger external actions with parameters
-        (e.g., play specific sound stimuli identified by integer codes).
+        (e.g., selecting which sound to play, controlling external devices).
+        
+        The interpretation of integer values is defined by the module connected
+        to the integerOutput signal. By convention, 0 typically means "no action"
+        and non-zero values trigger specific actions.
         
         Args:
             integer_outputs: 1D NumPy array of integer values for each state.
-                           A value of 0 means no integer output for that state.
+                           A value of 0 means no integer output signal is emitted.
         
         Raises:
             RuntimeError: If state machine is running
@@ -596,10 +600,16 @@ class StateMachine(QtCore.QObject):
             # output_value == -1 means no change, so we do nothing
             
     def _process_integer_outputs(self) -> None:
-        """Process output changes for the current state."""
+        """
+        Process integer output for the current state.
+        
+        Emits the integerOutput signal with the value for the current state,
+        unless the value is 0 (which means no signal is emitted).
+        """
         if self.integer_outputs is None:
             return
         iout = self.integer_outputs[self.current_state]
+        # Emit signal for all non-zero values
         if iout != 0:
             self.integerOutput.emit(iout)
             
