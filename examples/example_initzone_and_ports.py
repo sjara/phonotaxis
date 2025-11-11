@@ -71,9 +71,9 @@ class Paradigm(QMainWindow):
 
         # -- Add container for storing results from each trial --
         self.results = utils.EnumContainer()
-        maxNtrials = 4000
+        #maxNtrials = 4000
         self.results.labels['choice'] = bidict({'left':0, 'right':1, 'none':2})
-        self.results['choice'] = np.empty(maxNtrials, dtype=int)
+        self.results['choice'] = []  # np.empty(maxNtrials, dtype=int)
 
         # -- Add graphical parameters -
         self.session_info = widgets.SessionInfo()
@@ -115,8 +115,6 @@ class Paradigm(QMainWindow):
 
         # -- Initialize video --
         self.start_video_thread()
-        self.frame_data = {'timestamp': [], 'centroid_x': [], 'centroid_y': []}  # To store frame data
-        self.trial_data = []  # To store trial data for later analysis
 
         # -- Video interface for zone detection --
         video_zones = { 'IZ': ('circular', tuple(DEFAULT_INITZONE)) }
@@ -174,11 +172,6 @@ class Paradigm(QMainWindow):
 
     def update_image(self, timestamp, frame, points, contour):
         """Updates the video display label with new frames and points."""
-        if self.session_running:
-            self.frame_data['timestamp'].append(timestamp)
-            # FIXME: is the centroid point (x, y) or (row, col)?
-            self.frame_data['centroid_x'].append(points[0][0])
-            self.frame_data['centroid_y'].append(points[0][1])
         self.video_widget.display_frame(frame, points, contour=contour)
             
     def start_session(self):
@@ -216,7 +209,7 @@ class Paradigm(QMainWindow):
         """
         subject = self.session_info.get_value('subject')
         if self.controller.current_trial > 0:
-            containers = [self.params, self.controller, self.sm, self.results]
+            containers = [self.params, self.controller, self.sm, self.results, self.video_thread]
             self.savedata_widget.to_file(containers,
                                          subject=subject,
                                          paradigm=PARADIGM_NAME)
@@ -237,16 +230,20 @@ class Paradigm(QMainWindow):
 
         self.sm.reset_transitions()
         self.sm.add_state(name='wait_for_poke', statetimer=np.inf,
-                          transitions={'IZin':'play_sound', 
-                                       'Lin':'reward_on_L', 'Rin':'reward_on_R'},
+                          transitions={'IZin':'play_sound',
+                                       'Lin':'choice_left', 'Rin':'choice_right'},
                           outputsOff=['ValveL', 'ValveR'])
         self.sm.add_state(name='play_sound', statetimer=sound_duration,
                           transitions={'Tup':'wait_for_poke'},
                           integerOut=SOUND_ID_INITZONE)
-        self.sm.add_state(name='reward_on_L', statetimer=valve_duration,
+        self.sm.add_state(name='choice_left', statetimer=0,
+                          transitions={'Tup':'reward_left'})
+        self.sm.add_state(name='choice_right', statetimer=0,
+                            transitions={'Tup':'reward_right'})
+        self.sm.add_state(name='reward_left', statetimer=valve_duration,
                           transitions={'Tup':'reward_off'},
                           outputsOn=['ValveL'], integerOut=SOUND_ID_LEFT)
-        self.sm.add_state(name='reward_on_R', statetimer=valve_duration,
+        self.sm.add_state(name='reward_right', statetimer=valve_duration,
                           transitions={'Tup':'reward_off'},
                           outputsOn=['ValveR'], integerOut=SOUND_ID_RIGHT)
         self.sm.add_state(name='reward_off', statetimer=0,
@@ -258,7 +255,16 @@ class Paradigm(QMainWindow):
         self.controller.ready_to_start_trial()
 
     def process_results(self, trial):
-        pass
+        """Process results from the last completed trial."""
+        events_df = self.controller.get_events_one_trial(trial)
+        states = events_df.next_state.values
+        if self.sm.states['choice_left'] in states:
+            choice = self.results.labels['choice']['left']
+        elif self.sm.states['choice_right'] in states:
+            choice = self.results.labels['choice']['right']
+        else:
+            choice = self.results.labels['choice']['none']
+        self.results['choice'].append(choice)
 
     def closeEvent(self, event):
         self.interface.close()  # Close the emulator window
