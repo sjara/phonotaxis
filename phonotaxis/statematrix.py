@@ -211,8 +211,10 @@ class StateMatrix():
                 
         The END state serves as a waiting state where the machine waits until it
         is forced to transition to a user-defined state for the next trial.
+        All outputs are turned OFF in the END state.
         """
-        self.add_state(name='END', statetimer=INFINITE_TIME)
+        self.add_state(name='END', statetimer=INFINITE_TIME, 
+                      outputsOff=list(self.outputs_dict.keys()))
         
     def _append_state_to_list(self, state_name: str) -> None:
         """
@@ -270,8 +272,10 @@ class StateMatrix():
             trigger: List of extra timer names to start/trigger when entering
                     this state. Timer names must exist in extra_timers_names or a
                     ValueError will be raised.
-            integerOut: Integer output when entering this state. A value of 0 means
-                    no numeric output.
+            integerOut: Integer output value emitted when entering this state.
+                       A value of 0 means no integer output signal is emitted.
+                       The interpretation of non-zero values depends on the module
+                       connected to the state machine's integerOutput signal.
         
         Raises:
             ValueError: If any event name, output name, or timer name is invalid.
@@ -601,11 +605,15 @@ class StateMatrix():
         Note:
             This method preserves the states themselves but removes all
             custom transition logic, timers, and output configurations.
+            The END state (state 0) has all outputs set to OFF.
         """
         for state_ind in self.states.inverse.keys():
             self.state_matrix[state_ind] = self._make_default_row(state_ind)
             self.state_timers[state_ind] = INFINITE_TIME
-            self.state_outputs[state_ind] = self.n_outputs*[NOCHANGE]
+            if state_ind == 0:  # END state - turn all outputs OFF
+                self.state_outputs[state_ind] = self.n_outputs*[0]
+            else:
+                self.state_outputs[state_ind] = self.n_outputs*[NOCHANGE]
 
     def get_extra_timers(self) -> np.ndarray:
         """
