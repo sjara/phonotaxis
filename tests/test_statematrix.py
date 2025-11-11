@@ -55,6 +55,16 @@ class TestStateMatrixInit:
         assert sm.states['END'] == 0
         assert sm.get_end_state_index() == 0
         
+    def test_end_state_outputs_off(self):
+        """Test that END state has all outputs set to OFF."""
+        sm = statematrix.StateMatrix(inputs=[], outputs=['valve', 'led', 'buzzer'])
+        
+        outputs = sm.get_outputs()
+        end_state_idx = sm.get_end_state_index()
+        
+        # END state should have all outputs OFF (0)
+        assert np.all(outputs[end_state_idx] == 0)
+        
     def test_init_creates_events_dict(self):
         """Test that events dictionary is properly created from inputs."""
         sm = statematrix.StateMatrix(inputs=['C', 'L'], outputs=[])
@@ -451,10 +461,12 @@ class TestStateMatrixUtilities:
         timers = sm.get_state_timers()
         assert np.all(np.isinf(timers))
         
-        # Outputs should be NOCHANGE
+        # Outputs: END state (0) should be OFF, other states should be NOCHANGE
         outputs = sm.get_outputs()
-        assert np.all(outputs == statematrix.NOCHANGE)
-        
+        assert np.all(outputs[0] == 0)  # END state outputs are OFF
+        for ind in range(1, outputs.shape[0]):
+            assert np.all(outputs[ind] == statematrix.NOCHANGE)  # Other states are NOCHANGE
+
     def test_analyze_matrix_properties(self):
         """Test matrix property analysis."""
         sm = statematrix.StateMatrix(inputs=['C'], outputs=[])

@@ -19,13 +19,23 @@ A state matrix defines a finite state machine that controls behavioral experimen
 - **Transitions**: Which state to move to when specific events occur
 - **Timers**: How long to remain in the state before timing out
 - **Outputs**: Which hardware outputs (valves, LEDs, etc.) to turn on or off
-- **Integer outputs**: Numeric codes that can trigger sounds or other actions
+- **Integer outputs**: Numeric codes emitted to connected modules (e.g., to trigger sounds)
 
-The state matrix is created using the `StateMatrix` class from the `statematrix` module and passed to the session controller to execute trials.
+The state matrix is created using the `StateMatrix` class from the `statematrix` module and passed to the session controller (explained elsewhere) to execute trials.
+
+Generally, the state matrix is reset and repopulated before the start of each trial. This enables defining a different behavior (*e.g.*, presenting a different stimulus) for each trial.
 
 ---
 
 ## Input Events
+
+### Types of Events
+
+1. **Video events:** The user can define video zones that generate events when the tracked object enters a zone.
+2. **Arduino/Hardware events:** The Arduino can detect threshold-crossings on analog inputs.
+3. **'Tup' event:** Each state has a timer that produces a 'Tup' event when the timer expires (explained in a later section).
+4. **Extra timer events:** Additional timers for periods that span multiple states can be defined.
+
 
 ### Hardware and Video Inputs Become Two Events Each
 
@@ -60,10 +70,10 @@ These event names are used in the `transitions` parameter when adding states.
 ### Event Ordering
 
 Generally, events are indexed in the following order:
-1. **Video events** come first (in the order zones are defined)
-2. **Arduino/Hardware events** come next (in the order defined in `ARDUINO_INPUTS`)
-3. **'Tup' event** (state timer timeout) comes last
-4. **Extra timer events** (if defined) come after 'Tup'
+1. **Video events** come first (in the order zones are defined).
+2. **Arduino/Hardware events** come next (in the order defined in `ARDUINO_INPUTS`).
+3. **'Tup' event** (state timer timeout) comes last.
+4. **Extra timer events** (if defined) come after 'Tup'.
 
 ---
 
@@ -104,8 +114,8 @@ For an example of a full state matrix, see `examples/example_initzone_and_ports.
 
 **`transitions`** (dict):
 - Maps event names to target state names
-- Events not listed will cause the state to stay in itself (self-transition)
-- Common event names: 'IZin', 'IZout', 'Lin', 'Lout', 'Rin', 'Rout', 'Tup'
+- Events not listed will cause the machine to stay in the same state
+- Common event names: `'IZin'`, `'IZout'`, `'Lin'`, `'Lout'`, `'Rin'`, `'Rout'`, `'Tup'`
 
 **`outputsOn`** (list):
 - Names of outputs to turn ON when entering this state
@@ -119,9 +129,10 @@ For an example of a full state matrix, see `examples/example_initzone_and_ports.
 
 **`integerOut`** (int):
 - Numeric code emitted when entering this state
-- Often used to trigger sound playback via `SoundPlayer`
-- Default is 0 (no numeric output)
-- Example: `integerOut=3` triggers a specific sound
+- Value of 0 (default) means no signal is emitted
+- Non-zero values are sent to connected modules for interpretation
+- Common use: triggering sound playback via `SoundPlayer` (positive values play sounds, -1 stops all sounds)
+- Example: `integerOut=3` will trigger sound ID 3 (when used in conjunction with `SoundPlayer`)
 
 ---
 
@@ -211,10 +222,10 @@ sm.add_state(name='valve_off', statetimer=0,
 
 ### Integer Outputs for Sound Playback
 
-The `integerOut` parameter is commonly used to trigger pre-loaded sounds:
+The `integerOut` parameter emits a numeric code when entering a state. This can be used to trigger various actions depending on what module is connected to the state machine's `integerOutput` signal. When connected to the `SoundPlayer` module (explained elsewhere), `integerOutput` is used to trigger pre-loaded sounds:
 
 ```python
-# Sound IDs (defined earlier)
+# Example sound IDs
 SOUND_ID_LEFT = 1
 SOUND_ID_RIGHT = 2
 
@@ -226,24 +237,28 @@ sm.add_state(name='play_right_sound', statetimer=0.5,
              integerOut=SOUND_ID_RIGHT)
 ```
 
-The `SoundPlayer` module listens for these integer outputs and plays the corresponding sound.
+**Integer output convention when using with `SoundPlayer`**:
+- **Positive values (1, 2, 3, ...)**: Play sound with this ID
+- **`-1`**: Stop all currently playing sounds
+- **Other negative values**: Reserved for future use
 
-**NOTE:** The value `integerOut=0` is reserved for turning sounds off.
+The `SoundPlayer` module listens for these integer outputs and plays the corresponding sound or stops sounds based on the value.
 
 ---
 
 ## Resetting Transitions
 
+Remember that the state matrix should be reset and repopulated before the start of each trial, so the new trial can have a different behavior (*e.g.*, trigger a different stimulus).
+
 ### When to use `reset_transitions()`
 
-The `reset_transitions()` method clears all custom transitions and resets the state matrix to a default state. **You should call this when preparing a new trial** (e.g., in  `prepare_next_trial()`, before defining the state matrix for the next trial.
+The `reset_transitions()` method clears all previously set transitions and resets the state matrix to a default state. **You should call this when preparing a new trial** (e.g., in  `prepare_next_trial()`, before defining the state matrix for the next trial.
 
 ### Why Reset?
 
 State matrices are reused across trials. If you don't reset:
 - Old transitions from previous trials persist
 - State definitions accumulate and can cause unexpected behavior
-- Memory usage grows unnecessarily
 
 ### Typical Usage Pattern
 
@@ -271,9 +286,9 @@ def prepare_next_trial(self, next_trial):
 
 ### What `reset_transitions()` does
 
-1. Resets all state transitions to self-loops (every event returns to the same state)
+1. Resets all state transitions to self-transitions (no event will produce a transition to another state)
 2. Sets all state timers to `INFINITE_TIME`
-3. Sets all outputs to `NOCHANGE`
+3. Sets all outputs to `NOCHANGE`, **except for the END state (state 0)** which has all outputs set to OFF
 4. **Does NOT** delete states - the state structure remains. This is useful for keeping a consistent mapping between states and state IDs across trials.
 
 After resetting, you rebuild only the states needed for the current trial.
@@ -283,15 +298,15 @@ After resetting, you rebuild only the states needed for the current trial.
 ## Example State Matrix Output
 
 When you print a state matrix (using `print(sm)`), you get a formatted table showing the complete structure. Here's an example from `example_initzone_and_ports.py`, with:
-- Six states (one per row, from 0 to 5)
-- One video input (IZ) and two arduino inputs ('L', 'R'). This yields a total of 6 input events + 1 timer event.
-- A state timer for each state 
-- Two binary outputs
-- And one (default) integer output
+- Six states (one per row, from 0 to 5).
+- One video input (`IZ`) and two arduino inputs (`L`, `R`). This yields a total of 6 input events + 1 timer event.
+- A state timer for each state.
+- Two binary outputs (in this case corresponding to `ValveL` and `ValveR`).
+- And one integer output (in thi case to trigger a sound).
 
 ```
                      IZin  IZout  Lin  Lout  Rin  Rout  Tup  |  Timers  Outputs  integerOut
-END              [0]    0     0    0     0    0     0    0   |    inf     --       0
+END              [0]    0     0    0     0    0     0    0   |    inf     00       0
 wait_for_poke    [1]    2     1    3     1    4     1    1   |    inf     00       0
 play_sound       [2]    1     2    2     2    2     2    1   |   0.40     --       3
 reward_on_L      [3]    5     3    3     3    3     3    5   |   0.10     10       2
@@ -304,7 +319,6 @@ reward_off       [5]    0     5    5     5    5     5    0   |   0.00     00    
 **Header Row**:
 - **Event columns**: IZin, IZout, Lin, Lout, Rin, Rout, Tup
   - These are the possible events that can occur
-  - Each abbreviated to 5 characters in the display
 - **Timers**: Duration the state will last
 - **Outputs**: State of each output (see below)
 - **integerOut**: Numeric code emitted
@@ -319,7 +333,7 @@ reward_off       [5]    0     5    5     5    5     5    0   |   0.00     00    
   - `1` = ON
   - `0` = OFF
   - `-` = NOCHANGE (maintains previous state)
-- **integerOut**: Numeric value (0 = none)
+- **integerOut**: Numeric value (0 means no output)
 
 ### Example Analysis
 
@@ -346,6 +360,7 @@ The `END` state (always state 0) is special:
 - Automatically created when initializing StateMatrix
 - Serves as a waiting state between trials
 - All events self-transition (stay in END)
+- **All outputs are turned OFF** to ensure a clean state between trials
 - Typically reached at the end of each trial
 - The controller uses forced transitions to move from END to state 1 to start trials
 
