@@ -177,13 +177,16 @@ class VideoThread(QThread):
 
     def store_tracking_data(self, timestamp, points):
         """
-        Appends timestamp and points to the tracking lists, but only if video recording is active.
+        Appends timestamp and points to the tracking lists whenever tracking is enabled.
+        
+        Tracking data is stored independently of video recording, allowing you to
+        save tracking data without necessarily saving the raw video file.
         
         Args:
             timestamp (float): The timestamp of the frame.
             points (tuple): The points of interest detected in the frame.
         """
-        if self.recording_status:
+        if self.tracking:
             self.timestamps.append(timestamp)
             
             # Ensure we have enough point lists for all detected points
@@ -455,6 +458,58 @@ class VideoThread(QThread):
         if self.debug:
             print(f"Centroid: {centroid} \t Largest area: {largest_area}")
         return (processed_frame, points, largest_contour)
+    
+    def append_to_file(self, h5file):
+        """
+        Save tracking data (timestamps and centroid positions) to an HDF5 file.
+        
+        Creates a '/video_tracking' group in the HDF5 file and saves:
+        - 'timestamps': array of frame timestamps (float)
+        - 'centroid_x': array of x-coordinates of tracked centroids (int)
+        - 'centroid_y': array of y-coordinates of tracked centroids (int)
+        
+        Tracking data is collected whenever tracking is enabled (tracking=True),
+        independently of whether video recording is active. This allows you to
+        save tracking data without necessarily saving the raw video file.
+        
+        Args:
+            h5file: Open HDF5 file handle (from h5py)
+            
+        Returns:
+            HDF5 group object containing the tracking datasets
+            
+        Raises:
+            UserWarning: If no tracking data has been collected
+            RuntimeError: If there's an error creating the HDF5 group or datasets
+        """
+        if len(self.timestamps) == 0:
+            raise UserWarning('No tracking data found. Make sure tracking was enabled (tracking=True).')
+        
+        try:
+            tracking_group = h5file.create_group('/videoTracking')
+            
+            # Save timestamps
+            tracking_group.create_dataset('timestamps', data=np.array(self.timestamps))
+            
+            # Save centroid coordinates
+            # self.points is a list of lists, where each element is a list of (x,y) tuples for one point
+            # For the typical case of tracking one object, we have self.points[0] = [(x1,y1), (x2,y2), ...]
+            if len(self.points) > 0 and len(self.points[0]) > 0:
+                # Extract x and y coordinates from the first tracked point
+                centroid_x = np.array([point[0] for point in self.points[0]])
+                centroid_y = np.array([point[1] for point in self.points[0]])
+                
+                tracking_group.create_dataset('centroid_x', data=centroid_x)
+                tracking_group.create_dataset('centroid_y', data=centroid_y)
+            else:
+                # No points tracked, create empty datasets
+                tracking_group.create_dataset('centroid_x', data=np.array([]))
+                tracking_group.create_dataset('centroid_y', data=np.array([]))
+            
+            return tracking_group
+            
+        except Exception as e:
+            raise RuntimeError(f'Error saving video tracking data to file: {str(e)}')
         
     def stop(self):
         """Stops the video capture thread gracefully."""
