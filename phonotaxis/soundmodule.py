@@ -40,6 +40,28 @@ def apply_rise_fall(waveform, samplingRate, riseTime, fallTime):
 
 
 class SoundPlayer():
+    """
+    Sound player for managing and playing multiple sounds.
+    
+    This class manages a library of Sound objects indexed by integer IDs and
+    provides playback control. It can be connected to a state machine's
+    integerOutput signal for automated sound playback during behavioral tasks.
+    
+    Integer ID Convention:
+        0: No action (reserved, no sound plays)
+        Positive (1, 2, 3, ...): Play sound with this ID
+        -1: Stop all currently playing sounds
+        Other negative values: Reserved for future use
+    
+    Example:
+        >>> player = SoundPlayer()
+        >>> player.set_sound(1, sound1)
+        >>> player.set_sound(2, sound2)
+        >>> player.play(1)  # Play sound 1
+        >>> player.play(-1)  # Stop all sounds
+        >>> # Connect to state machine:
+        >>> state_machine.integerOutput.connect(player.play)
+    """
     def __init__(self):
         self.device = sd.default.device[1]  # Use default device
         self.sounds = {}  # Maps integer IDs to Sound objects
@@ -59,6 +81,12 @@ class SoundPlayer():
         """
         Play a sound by its integer ID (non-blocking, simple method).
         
+        Integer ID values:
+            0: No action
+            Positive (1, 2, 3, ...): Play sound with this ID
+            -1: Stop all sounds
+            Other negative values: Reserved for future use
+        
         Note: This method doesn't allow stopping individual sounds.
         Use play_stream() if you need that capability.
         
@@ -66,17 +94,31 @@ class SoundPlayer():
             sound_id (int): Integer ID of the sound to play
         """
         if sound_id == 0:
-            return  # 0 means no sound
+            return  # 0 means no action
         
-        if sound_id in self.sounds:
-            sound = self.sounds[sound_id]
-            sd.play(sound.wave, sound.srate, device=self.device)
+        if sound_id == -1:
+            self.stop()  # Stop all sounds
+            return
+        
+        if sound_id > 0:
+            if sound_id in self.sounds:
+                sound = self.sounds[sound_id]
+                sd.play(sound.wave, sound.srate, device=self.device)
+            else:
+                print(f"Warning: Sound ID {sound_id} not found")
         else:
-            print(f"Warning: Sound ID {sound_id} not found")
+            # Other negative values are reserved for future use
+            print(f"Warning: Unrecognized control signal {sound_id} (reserved for future use)")
 
     def play_stream(self, sound_id):
         """
         Play a sound by its integer ID using a stream (allows stopping individual sounds).
+        
+        Integer ID values:
+            0: No action
+            Positive (1, 2, 3, ...): Play sound with this ID
+            -1: Stop all sounds
+            Other negative values: Reserved for future use
         
         IMPLELEMENTATION IN PROGRESS
 
@@ -87,47 +129,55 @@ class SoundPlayer():
             sound_id (int): Integer ID of the sound to play
         """
         if sound_id == 0:
-            return  # 0 means no sound
+            return  # 0 means no action
         
-        if sound_id in self.sounds:
-            sound = self.sounds[sound_id]
-            
-            # Prepare the waveform data
-            wave_data = sound.wave.astype(np.float32)
-            
-            # Create a closure to keep track of playback position
-            position = [0]  # Use list to allow modification in nested function
-            
-            def callback(outdata, frames, time_info, status):
-                """Callback function to feed audio data to the stream."""
-                if status:
-                    print(f"Stream status: {status}")
+        if sound_id == -1:
+            self.stop_stream()  # Stop all streams
+            return
+        
+        if sound_id > 0:
+            if sound_id in self.sounds:
+                sound = self.sounds[sound_id]
                 
-                chunksize = min(len(wave_data) - position[0], frames)
-                outdata[:chunksize] = wave_data[position[0]:position[0] + chunksize]
+                # Prepare the waveform data
+                wave_data = sound.wave.astype(np.float32)
                 
-                if chunksize < frames:
-                    outdata[chunksize:] = 0  # Fill remaining with silence
-                    raise sd.CallbackStop()  # Stop the stream when done
+                # Create a closure to keep track of playback position
+                position = [0]  # Use list to allow modification in nested function
                 
-                position[0] += chunksize
-            
-            # Create an OutputStream with callback for non-blocking playback
-            stream = sd.OutputStream(
-                samplerate=sound.srate,
-                channels=sound.nchannels,
-                device=self.device,
-                callback=callback,
-                finished_callback=lambda: self._cleanup_stream(sound_id)
-            )
-            
-            # Store the stream for later control (stopping, etc.)
-            self.active_streams[sound_id] = stream
-            
-            # Start the stream (non-blocking)
-            stream.start()
+                def callback(outdata, frames, time_info, status):
+                    """Callback function to feed audio data to the stream."""
+                    if status:
+                        print(f"Stream status: {status}")
+                    
+                    chunksize = min(len(wave_data) - position[0], frames)
+                    outdata[:chunksize] = wave_data[position[0]:position[0] + chunksize]
+                    
+                    if chunksize < frames:
+                        outdata[chunksize:] = 0  # Fill remaining with silence
+                        raise sd.CallbackStop()  # Stop the stream when done
+                    
+                    position[0] += chunksize
+                
+                # Create an OutputStream with callback for non-blocking playback
+                stream = sd.OutputStream(
+                    samplerate=sound.srate,
+                    channels=sound.nchannels,
+                    device=self.device,
+                    callback=callback,
+                    finished_callback=lambda: self._cleanup_stream(sound_id)
+                )
+                
+                # Store the stream for later control (stopping, etc.)
+                self.active_streams[sound_id] = stream
+                
+                # Start the stream (non-blocking)
+                stream.start()
+            else:
+                print(f"Warning: Sound ID {sound_id} not found")
         else:
-            print(f"Warning: Sound ID {sound_id} not found")
+            # Other negative values are reserved for future use
+            print(f"Warning: Unrecognized control signal {sound_id} (reserved for future use)")
 
     def _cleanup_stream(self, sound_id):
         """Internal method to clean up a stream after it finishes playing."""
