@@ -736,7 +736,7 @@ class VideoInterface(QObject):
         
         Note that the signal may have additional parameters not used here.
         """
-        if not self.state_machine or not self.state_machine.is_running:
+        if not self.state_machine or not self.state_machine.is_active:
             return
         
         # Only process if we have valid tracking data

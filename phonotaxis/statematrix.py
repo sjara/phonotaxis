@@ -52,7 +52,9 @@ class StateMatrix():
     [ Cin  Cout  Lin  Lout  Rin  Rout  Tup]
 
     Where the first six are for center, left and right ports, and the
-    next column for the state timer.
+    next column for the state timer. If extra timers are defined, they are added
+    as additional columns after 'Tup':
+    [ Cin  Cout  Lin  Lout  Rin  Rout  Tup  timer1  timer2  ...]
 
     State Structure:
         - END state: Always state 0, created automatically during initialization
@@ -74,24 +76,26 @@ class StateMatrix():
             
         Utilities:
             get_timer_event_index(): Returns index of timer event ('Tup')
-            get_states_dict(): Returns bidirectional state name/index mapping
+            get_states(): Returns bidirectional state name/index mapping
             get_end_state_index(): Returns index of END state (always 0)
             analyze_matrix_properties(): Analyzes matrix connectivity and properties
             append_to_file(): Save state matrix definitions to HDF5 file
 
     Attributes:
-        inputs_dict: Dictionary mapping input names to sequential indices (auto-generated)
-        outputs_dict: Dictionary mapping output names to sequential indices (auto-generated)  
+        inputs: Dictionary mapping input names to sequential indices (auto-generated)
+        outputs: Dictionary mapping output names to sequential indices (auto-generated)  
         state_matrix: Internal list of lists for building (use get_matrix() for NumPy access)
         state_timers: Internal list of timer durations (use get_state_timers() for NumPy access)
         state_outputs: Internal list of output configs (use get_outputs() for NumPy access)
         integer_outputs: Internal list of numeric output values for each state
         states: Bidirectional dictionary mapping state names to indices and vice versa
-        events_dict: Bidirectional dictionary mapping event names to column indices
+        events: Bidirectional dictionary mapping event names to column indices
         extra_timers_names: List of extra timer names
         extra_timers_duration: List of extra timer durations
         extra_timers_triggers: List of states that trigger extra timers
-        n_input_events: Number of input events in the events dictionary
+        n_input_events: Number of events in the matrix before extra timers are added.
+                       Includes physical input events (e.g., Cin, Cout) and the state
+                       timer event ('Tup'), but excludes extra timer events.
         n_outputs: Number of outputs defined
         
     Note:
@@ -115,6 +119,7 @@ class StateMatrix():
                     Pass an empty list [] if no outputs are needed.
             extratimers: List of extra timer names. These timers can be triggered
                         by specific states and continue running across state transitions.
+                        Each extra timer can only be triggered by one state.
 
         Note:
             The state matrix automatically creates an END state as state 0 when initialized.
@@ -131,8 +136,8 @@ class StateMatrix():
             extratimers = []
         
         # Create dictionaries with sequential indices starting from 0
-        self.inputs_dict = {name: idx for idx, name in enumerate(inputs)}
-        self.outputs_dict = {name: idx for idx, name in enumerate(outputs)}
+        self.inputs = {name: idx for idx, name in enumerate(inputs)}
+        self.outputs = {name: idx for idx, name in enumerate(outputs)}
 
         # Initialize lists that will grow as needed
         self.state_matrix = []
@@ -152,15 +157,15 @@ class StateMatrix():
         self.extra_timers_triggers = []
 
         # This dictionary is modified if ExtraTimers are used.
-        self.events_dict = bidict()
-        for key,val in self.inputs_dict.items():
-            self.events_dict[key+'in'] = 2*val
-            self.events_dict[key+'out'] = 2*val+1
-        self.events_dict['Tup'] = len(self.events_dict)
+        self.events = bidict()
+        for key,val in self.inputs.items():
+            self.events[key+'in'] = 2*val
+            self.events[key+'out'] = 2*val+1
+        self.events['Tup'] = len(self.events)
 
-        self.n_input_events = len(self.events_dict)
-        self.events_dict['Forced'] = -1
-        self.n_outputs = len(self.outputs_dict)
+        self.n_input_events = len(self.events)
+        self.events['Forced'] = -1
+        self.n_outputs = len(self.outputs)
 
         for onetimer in extratimers:
             self._add_extratimer(onetimer)
@@ -178,8 +183,8 @@ class StateMatrix():
             h5file: Open HDF5 file handle where data will be written
         """
         statemat_group = h5file.create_group('/stateMatrix')
-        utils.append_dict_to_hdf5(statemat_group,'eventsNames',self.events_dict)
-        utils.append_dict_to_hdf5(statemat_group,'outputsNames',self.outputs_dict)
+        utils.append_dict_to_hdf5(statemat_group,'eventsNames',self.events)
+        utils.append_dict_to_hdf5(statemat_group,'outputsNames',self.outputs)
         utils.append_dict_to_hdf5(statemat_group,'statesNames',dict(self.states))
 
         #TODO: save names of extratimers and index corresponding to the event for each.
@@ -202,7 +207,8 @@ class StateMatrix():
             corresponds to an event and the value is the target state index
         """
         n_extra_timers = len(self.extra_timers_names)
-        new_row = (self.n_input_events+n_extra_timers)*[state_ind]    # Input events
+        # Create row with columns for: input events + Tup + extra timer events
+        new_row = (self.n_input_events + n_extra_timers) * [state_ind]
         return new_row
 
     def _init_mat(self) -> None:
@@ -214,7 +220,7 @@ class StateMatrix():
         All outputs are turned OFF in the END state.
         """
         self.add_state(name='END', statetimer=INFINITE_TIME, 
-                      outputsOff=list(self.outputs_dict.keys()))
+                      outputsOff=list(self.outputs.keys()))
         
     def _append_state_to_list(self, state_name: str) -> None:
         """
@@ -259,26 +265,29 @@ class StateMatrix():
         Args:
             name: Name of the state. If empty string, a default name will be used.
             statetimer: Duration in seconds that the state will last before
-                       timing out (triggering a 'Tup' event). Use float('inf')
-                       for states that should never timeout automatically.
+                        timing out (triggering a 'Tup' event). Use float('inf')
+                        for states that should never timeout automatically.
             transitions: Dictionary mapping event names to target state names.
-                        Events include input events (e.g., 'centerin', 'centerout')
-                        and timer events (e.g., 'Tup'). Event names must exist in
-                        events_dict or a ValueError will be raised.
+                         Events include input events (e.g., 'centerin', 'centerout')
+                         and timer events (e.g., 'Tup'). Event names must exist in
+                         events_dict or a ValueError will be raised.
             outputsOn: List of output names to turn ON when entering this state.
-                      Output names must exist in outputs_dict or a ValueError will be raised.
+                       Output names must exist in outputs or a ValueError will be raised.
             outputsOff: List of output names to turn OFF when entering this state.
-                       Output names must exist in outputs_dict or a ValueError will be raised.
-            trigger: List of extra timer names to start/trigger when entering
-                    this state. Timer names must exist in extra_timers_names or a
-                    ValueError will be raised.
+                        Output names must exist in outputs or a ValueError will be raised.
+            trigger: List of extra timer names to start/trigger when entering this state.
+                     Timer names must exist in extra_timers_names or a ValueError will be raised.
+                     Note: Each extra timer can only be triggered by ONE state. Attempting
+                     to assign the same timer to multiple states will raise a ValueError.
             integerOut: Integer output value emitted when entering this state.
-                       A value of 0 means no integer output signal is emitted.
-                       The interpretation of non-zero values depends on the module
-                       connected to the state machine's integerOutput signal.
+                        A value of 0 means no integer output signal is emitted.
+                        The interpretation of non-zero values depends on the module
+                        connected to the state machine's integerOutput signal.
         
         Raises:
-            ValueError: If any event name, output name, or timer name is invalid.
+            ValueError: If any event name, output name, or timer name is invalid, or
+                       if attempting to assign an extra timer that is already triggered
+                       by a different state.
                       
         Example:
             >>> sm.add_state(
@@ -302,8 +311,8 @@ class StateMatrix():
 
         # -- Validate event names in transitions --
         for event_name in transitions.keys():
-            if event_name not in self.events_dict:
-                valid_events = [k for k in self.events_dict.keys() if k != 'Forced']
+            if event_name not in self.events:
+                valid_events = [k for k in self.events.keys() if k != 'Forced']
                 raise ValueError(
                     f"Invalid event name '{event_name}' in transitions. "
                     f"Valid event names are: {valid_events}"
@@ -311,16 +320,16 @@ class StateMatrix():
         
         # -- Validate output names --
         for output_name in outputsOn:
-            if output_name not in self.outputs_dict:
+            if output_name not in self.outputs:
                 raise ValueError(
                     f"Invalid output name '{output_name}' in outputsOn. "
-                    f"Valid output names are: {list(self.outputs_dict.keys())}"
+                    f"Valid output names are: {list(self.outputs.keys())}"
                 )
         for output_name in outputsOff:
-            if output_name not in self.outputs_dict:
+            if output_name not in self.outputs:
                 raise ValueError(
                     f"Invalid output name '{output_name}' in outputsOff. "
-                    f"Valid output names are: {list(self.outputs_dict.keys())}"
+                    f"Valid output names are: {list(self.outputs.keys())}"
                 )
         
         # -- Validate extra timer names --
@@ -344,7 +353,7 @@ class StateMatrix():
             if target_state_name not in self.states:
                 self._append_state_to_list(target_state_name)
             target_state_ind = self.states[target_state_name]
-            new_row[self.events_dict[event_name]] = target_state_ind
+            new_row[self.events[event_name]] = target_state_ind
 
         # -- Update state properties --
         # Matrix row already exists from _append_state_to_list, just update it
@@ -354,16 +363,28 @@ class StateMatrix():
         # Reset outputs to default, then apply specified outputs
         self.state_outputs[this_state_ind] = self.n_outputs*[NOCHANGE]
         for one_output in outputsOn:
-            output_ind = self.outputs_dict[one_output]
+            output_ind = self.outputs[one_output]
             self.state_outputs[this_state_ind][output_ind] = 1
         for one_output in outputsOff:
-            output_ind = self.outputs_dict[one_output]
+            output_ind = self.outputs[one_output]
             self.state_outputs[this_state_ind][output_ind] = 0
         self.integer_outputs[this_state_ind] = integerOut
 
         # -- Add this state to the list of triggers for extra timers --
+        # Note: Each extra timer can only be triggered by one state.
         for one_extra_timer in trigger:
             extra_timer_ind = self.extra_timers_names.index(one_extra_timer)
+            # Check if this timer is already assigned to a different state
+            current_trigger = self.extra_timers_triggers[extra_timer_ind]
+            if current_trigger is not None and current_trigger != this_state_ind:
+                current_state_name = self.states.inverse[current_trigger]
+                this_state_name = self.states.inverse[this_state_ind]
+                raise ValueError(
+                    f"Extra timer '{one_extra_timer}' is already triggered by state "
+                    f"'{current_state_name}' (index {current_trigger}). "
+                    f"Cannot assign it to state '{this_state_name}' (index {this_state_ind}). "
+                    f"Each extra timer can only be triggered by one state."
+                )
             self.extra_timers_triggers[extra_timer_ind] = this_state_ind
 
     def _add_extratimer(self, name: str, duration: float = 0) -> None:
@@ -373,6 +394,9 @@ class StateMatrix():
         Extra timers are independent timers that can be triggered by specific
         states but continue running even after state transitions. They generate
         their own events when they expire.
+        
+        Each extra timer can only be triggered by ONE state. Use the 'trigger'
+        parameter in add_state() to specify which state triggers this timer.
         
         Args:
             name: Name of the extra timer
@@ -390,13 +414,16 @@ class StateMatrix():
             self.extra_timers_names.append(name)
         else:
             raise Exception(f'Extra timer ({name}) has already been defined.')
+        # Calculate event column index for this extra timer.
+        # n_input_events includes physical inputs (Cin, Cout, etc.) plus 'Tup'.
+        # Extra timers are added sequentially after these events.
         extra_timer_event_col = self.n_input_events + len(self.extra_timers_names)-1
-        self.events_dict[name] = extra_timer_event_col
+        self.events[name] = extra_timer_event_col
         #self._init_mat() # Initialize again with different number of columns
         self.extra_timers_duration.append(duration)
-        #self.extraTimersTriggers.append(None) # This will be filled by add_state
-        # The default trigger for extratimers is state 0. The state machine requires a trigger.
-        self.extra_timers_triggers.append(0) # This will be updated by add_state
+        # Extra timers must be explicitly triggered by a state (not the END state).
+        # Initialize as None; will be set by add_state() when a state specifies this timer.
+        self.extra_timers_triggers.append(None)
 
     def set_extratimer(self, name: str, duration: float) -> None:
         """
@@ -521,7 +548,7 @@ class StateMatrix():
             Integer index of the 'Tup' event column in the state matrix.
             This is useful when creating a StateMachine instance.
         """
-        return self.events_dict['Tup']
+        return self.events['Tup']
 
     def analyze_matrix_properties(self) -> Dict[str, Any]:
         """
@@ -631,11 +658,18 @@ class StateMatrix():
         
         Returns:
             NumPy array of integers representing which state index triggers each
-            extra timer.
+            extra timer. If an extra timer has not been assigned a trigger state,
+            it will have a value of -1 (indicating no trigger).
+            
+        Note:
+            It is valid to define extra timers that are never triggered. These
+            timers will have a trigger value of -1 in the returned array.
         """
-        return np.array(self.extra_timers_triggers, dtype=np.int32)
+        # Convert None values to -1 (no trigger assigned)
+        triggers = [t if t is not None else -1 for t in self.extra_timers_triggers]
+        return np.array(triggers, dtype=np.int32)
 
-    def get_states_dict(self) -> bidict:
+    def get_states(self) -> bidict:
         """
         Get the bidirectional mapping between state names and indices.
         
@@ -671,9 +705,9 @@ class StateMatrix():
         mat_str = '\n'
         rev_events_dict = {}
         mat_str += self._extratimers_as_str()
-        for key in self.events_dict:
+        for key in self.events:
             if key!='Forced':
-                rev_events_dict[self.events_dict[key]] = key
+                rev_events_dict[self.events[key]] = key
         mat_str += '\t\t\t'
         mat_str += '\t'.join([rev_events_dict[k][0:5] for k in sorted(rev_events_dict.keys())])
         mat_str += '\t\tTimers\tOutputs\tintegerOut'

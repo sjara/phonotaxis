@@ -24,8 +24,8 @@ class TestStateMatrixInit:
         """Test initialization with no inputs or outputs."""
         sm = statematrix.StateMatrix(inputs=[], outputs=[])
         
-        assert len(sm.inputs_dict) == 0
-        assert len(sm.outputs_dict) == 0
+        assert len(sm.inputs) == 0
+        assert len(sm.outputs) == 0
         assert sm.n_outputs == 0
         assert len(sm.extra_timers_names) == 0
         
@@ -33,18 +33,18 @@ class TestStateMatrixInit:
         """Test initialization with input names."""
         sm = statematrix.StateMatrix(inputs=['C', 'L', 'R'], outputs=[])
         
-        assert len(sm.inputs_dict) == 3
-        assert sm.inputs_dict['C'] == 0
-        assert sm.inputs_dict['L'] == 1
-        assert sm.inputs_dict['R'] == 2
+        assert len(sm.inputs) == 3
+        assert sm.inputs['C'] == 0
+        assert sm.inputs['L'] == 1
+        assert sm.inputs['R'] == 2
         
     def test_init_with_outputs(self):
         """Test initialization with output names."""
         sm = statematrix.StateMatrix(inputs=[], outputs=['valve', 'led'])
         
-        assert len(sm.outputs_dict) == 2
-        assert sm.outputs_dict['valve'] == 0
-        assert sm.outputs_dict['led'] == 1
+        assert len(sm.outputs) == 2
+        assert sm.outputs['valve'] == 0
+        assert sm.outputs['led'] == 1
         assert sm.n_outputs == 2
         
     def test_init_creates_end_state(self):
@@ -65,24 +65,24 @@ class TestStateMatrixInit:
         # END state should have all outputs OFF (0)
         assert np.all(outputs[end_state_idx] == 0)
         
-    def test_init_creates_events_dict(self):
+    def test_init_creates_events(self):
         """Test that events dictionary is properly created from inputs."""
         sm = statematrix.StateMatrix(inputs=['C', 'L'], outputs=[])
         
         # Should have Cin, Cout, Lin, Lout, Tup, and Forced
-        assert 'Cin' in sm.events_dict
-        assert 'Cout' in sm.events_dict
-        assert 'Lin' in sm.events_dict
-        assert 'Lout' in sm.events_dict
-        assert 'Tup' in sm.events_dict
-        assert 'Forced' in sm.events_dict
+        assert 'Cin' in sm.events
+        assert 'Cout' in sm.events
+        assert 'Lin' in sm.events
+        assert 'Lout' in sm.events
+        assert 'Tup' in sm.events
+        assert 'Forced' in sm.events
         
         # Check correct indices
-        assert sm.events_dict['Cin'] == 0
-        assert sm.events_dict['Cout'] == 1
-        assert sm.events_dict['Lin'] == 2
-        assert sm.events_dict['Lout'] == 3
-        assert sm.events_dict['Forced'] == -1
+        assert sm.events['Cin'] == 0
+        assert sm.events['Cout'] == 1
+        assert sm.events['Lin'] == 2
+        assert sm.events['Lout'] == 3
+        assert sm.events['Forced'] == -1
         
     def test_init_with_extratimers(self):
         """Test initialization with extra timers."""
@@ -96,8 +96,8 @@ class TestStateMatrixInit:
         assert 'timer1' in sm.extra_timers_names
         assert 'timer2' in sm.extra_timers_names
         # Extra timers should appear in events dict
-        assert 'timer1' in sm.events_dict
-        assert 'timer2' in sm.events_dict
+        assert 'timer1' in sm.events
+        assert 'timer2' in sm.events
 
 
 class TestStateMatrixConstruction:
@@ -123,7 +123,7 @@ class TestStateMatrixConstruction:
         matrix = sm.get_matrix()
         state1_idx = sm.states['state1']
         state2_idx = sm.states['state2']
-        cin_idx = sm.events_dict['Cin']
+        cin_idx = sm.events['Cin']
         
         assert matrix[state1_idx, cin_idx] == state2_idx
         
@@ -210,9 +210,9 @@ class TestStateMatrixConstruction:
         matrix = sm.get_matrix()
         choice_idx = sm.states['choice']
         
-        assert matrix[choice_idx, sm.events_dict['Lin']] == sm.states['left_reward']
-        assert matrix[choice_idx, sm.events_dict['Rin']] == sm.states['right_reward']
-        assert matrix[choice_idx, sm.events_dict['Tup']] == sm.states['timeout']
+        assert matrix[choice_idx, sm.events['Lin']] == sm.states['left_reward']
+        assert matrix[choice_idx, sm.events['Rin']] == sm.states['right_reward']
+        assert matrix[choice_idx, sm.events['Tup']] == sm.states['timeout']
         
     def test_self_transition(self):
         """Test state that transitions to itself."""
@@ -221,7 +221,7 @@ class TestStateMatrixConstruction:
         
         matrix = sm.get_matrix()
         loop_idx = sm.states['loop']
-        assert matrix[loop_idx, sm.events_dict['Cin']] == loop_idx
+        assert matrix[loop_idx, sm.events['Cin']] == loop_idx
 
 
 class TestStateMatrixValidation:
@@ -271,6 +271,28 @@ class TestStateMatrixValidation:
         
         with pytest.raises(Exception, match="has no extratimer"):
             sm.set_extratimer('nonexistent', 1.0)
+            
+    def test_extratimer_multiple_states_raises_error(self):
+        """Test that assigning same extra timer to multiple states raises error."""
+        sm = statematrix.StateMatrix(inputs=[], outputs=[], 
+                                     extratimers=['timer1'])
+        sm.add_state(name='state1', trigger=['timer1'])
+        
+        # Trying to assign the same timer to a different state should raise error
+        with pytest.raises(ValueError, match="already triggered by state"):
+            sm.add_state(name='state2', trigger=['timer1'])
+            
+    def test_extratimer_same_state_reentry_allowed(self):
+        """Test that updating same state with same timer is allowed."""
+        sm = statematrix.StateMatrix(inputs=[], outputs=[], 
+                                     extratimers=['timer1'])
+        sm.add_state(name='state1', trigger=['timer1'])
+        
+        # Updating the same state should not raise error
+        sm.add_state(name='state1', trigger=['timer1'], statetimer=5.0)
+        
+        triggers = sm.get_extra_triggers()
+        assert triggers[0] == sm.states['state1']
 
 
 class TestStateMatrixGetters:
@@ -368,16 +390,16 @@ class TestStateMatrixGetters:
         sm = statematrix.StateMatrix(inputs=['C', 'L'], outputs=[])
         tup_idx = sm.get_timer_event_index()
         
-        assert tup_idx == sm.events_dict['Tup']
+        assert tup_idx == sm.events['Tup']
         # Should be last regular event (before extra timers)
         assert tup_idx == 4  # Cin, Cout, Lin, Lout, Tup
         
-    def test_get_states_dict(self):
-        """Test that get_states_dict returns bidirectional mapping."""
+    def test_get_states(self):
+        """Test that get_states returns bidirectional mapping."""
         sm = statematrix.StateMatrix(inputs=[], outputs=[])
         sm.add_state(name='state1')
         
-        states = sm.get_states_dict()
+        states = sm.get_states()
         assert states['END'] == 0
         assert states['state1'] == 1
         assert states.inverse[0] == 'END'
@@ -393,15 +415,15 @@ class TestStateMatrixExtraTimers:
         sm._add_extratimer('punishment', 5.0)
         
         assert 'punishment' in sm.extra_timers_names
-        assert 'punishment' in sm.events_dict
+        assert 'punishment' in sm.events
         
-    def test_extratimer_in_events_dict(self):
+    def test_extratimer_in_events(self):
         """Test that extra timers appear in events dict."""
         sm = statematrix.StateMatrix(inputs=['C'], outputs=[], 
                                      extratimers=['timer1'])
         
         # Timer should be after all input events
-        assert sm.events_dict['timer1'] == 3  # After Cin, Cout, Tup
+        assert sm.events['timer1'] == 3  # After Cin, Cout, Tup
         
     def test_set_extratimer_duration(self):
         """Test setting extra timer duration."""
@@ -423,12 +445,24 @@ class TestStateMatrixExtraTimers:
         assert triggers[0] == state1_idx
         
     def test_extratimer_default_trigger(self):
-        """Test that extra timer default trigger is state 0."""
+        """Test that extra timer without trigger returns -1."""
         sm = statematrix.StateMatrix(inputs=[], outputs=[], 
                                      extratimers=['timer1'])
         
+        # Should return -1 for timers without assigned triggers
         triggers = sm.get_extra_triggers()
-        assert triggers[0] == 0  # Default to END state
+        assert triggers[0] == -1
+            
+    def test_extratimer_trigger_assigned(self):
+        """Test that extra timer trigger works after being assigned."""
+        sm = statematrix.StateMatrix(inputs=[], outputs=[], 
+                                     extratimers=['timer1'])
+        sm.add_state(name='state1', trigger=['timer1'])
+        
+        # Should not raise error after trigger is assigned
+        triggers = sm.get_extra_triggers()
+        state1_idx = sm.states['state1']
+        assert triggers[0] == state1_idx
         
     def test_multiple_extratimers(self):
         """Test multiple extra timers."""
@@ -551,8 +585,8 @@ class TestStateMatrixEdgeCases:
         sm.add_state(name='state1', outputsOn=['led'])
         
         # Should only have 'Tup' and 'Forced' events
-        assert 'Tup' in sm.events_dict
-        assert 'Forced' in sm.events_dict
+        assert 'Tup' in sm.events
+        assert 'Forced' in sm.events
         
     def test_no_outputs_valid(self):
         """Test that state matrix works with no outputs."""
@@ -651,8 +685,8 @@ class TestStateMatrixIntegration:
         left_reward_idx = sm.states['left_reward']
         right_reward_idx = sm.states['right_reward']
         
-        assert matrix[choice_idx, sm.events_dict['Lin']] == left_reward_idx
-        assert matrix[choice_idx, sm.events_dict['Rin']] == right_reward_idx
+        assert matrix[choice_idx, sm.events['Lin']] == left_reward_idx
+        assert matrix[choice_idx, sm.events['Rin']] == right_reward_idx
         
     def test_state_matrix_with_extratimer(self):
         """Test state matrix with extra timer for punishment."""

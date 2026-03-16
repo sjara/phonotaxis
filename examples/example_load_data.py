@@ -39,3 +39,4 @@ print("")
 
 print("Video tracking data keys:")
 print(sdata.video_tracking.keys())
+print("")

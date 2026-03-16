@@ -548,7 +548,7 @@ class ArduinoInterface(QThread):
             value: Current analog value
             is_rising_edge: True for rising edge, False for falling edge
         """
-        if not self.state_machine or not self.state_machine.is_running:
+        if not self.state_machine or not self.state_machine.is_active:
             return
         
         # Get input name from pin number

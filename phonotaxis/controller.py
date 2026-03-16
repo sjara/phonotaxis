@@ -157,6 +157,12 @@ class SessionController(QObject):
             self.state_machine.set_state_outputs(state_matrix.get_outputs())
             self.state_machine.set_integer_outputs(state_matrix.get_integer_outputs())
             
+            # Set extra timers if any are defined
+            extra_timers_durations = state_matrix.get_extra_timers()
+            extra_timers_triggers = state_matrix.get_extra_triggers()
+            if len(extra_timers_durations) > 0:
+                self.state_machine.set_extra_timers(extra_timers_durations, extra_timers_triggers)
+            
             self.log_message.emit('State matrix updated successfully')
             
         except Exception as e:
@@ -264,21 +270,40 @@ class SessionController(QObject):
         Signal that next trial is ready to start.
         
         Called by the paradigm/task after preparing the trial in response to
-        the prepare_next_trial signal. Increments trial counter and forces
-        state machine to first user state (state 1).
+        the prepare_next_trial signal. Increments trial counter, resumes the
+        state machine (processing any queued events), and forces transition
+        to first user state (state 1).
         
         Note:
             Only proceeds if session is running and preparing_next_trial flag is set.
             This prevents race conditions from multiple calls.
+            
+            Events that occurred during trial preparation will be processed in the
+            order they occurred before transitioning to the first user state.
         """
         if self.is_running and self.preparing_next_trial:
             self.current_trial += 1
             self.preparing_next_trial = False
             if len(self.state_matrix.states) > 1:
-                self.state_machine.start()
-                self.state_machine.force_state(1)  # Go to first user state
-                self.log_message.emit(f'Started trial {self.current_trial}')
-                self._emit_status_update()
+                # If the state machine has not yet been started, start it.
+                # Otherwise, resume processing of queued events (if suspended).
+                try:
+                    if not getattr(self.state_machine, 'is_active', False):
+                        self.state_machine.start()
+                    else:
+                        # Only resume if processing is suspended; resume will
+                        # process any queued events if present.
+                        if not getattr(self.state_machine, 'is_processing', True):
+                            self.state_machine.resume(process_queued=True)
+
+                    # Move into first user state for the trial
+                    self.state_machine.force_state(1)  # Go to first user state
+                    self.log_message.emit(f'Started trial {self.current_trial}')
+                    self._emit_status_update()
+                except Exception as e:
+                    # Log and re-raise to surface any unexpected errors
+                    self.log_message.emit(f'Error starting trial {self.current_trial}: {e}')
+                    raise
             
     def _on_state_changed(self, new_state: int) -> None:
         """
@@ -292,7 +317,7 @@ class SessionController(QObject):
         # Check if we need to prepare next trial
         if (self.current_state in self.prepare_next_trial_states and 
             not self.preparing_next_trial and self.is_running):
-            self.state_machine.stop()
+            self.state_machine.pause()  # Suspend event processing during trial preparation
             self.preparing_next_trial = True
             self.prepare_next_trial.emit(self.current_trial + 1)
             
@@ -381,11 +406,11 @@ class SessionController(QObject):
         Returns:
             DataFrame with added 'events_str' and 'next_state_str' columns
         """
-        evdict = self.state_matrix.events_dict.inverse
-        stdict = self.state_matrix.get_states_dict().inverse
+        evdict = self.state_matrix.events.inverse
+        stdict = self.state_matrix.get_states().inverse
         evstr = [evdict[ev] for ev in self.events]
         ststr = [stdict[st] for st in self.next_states]
-        dframe['events_str'] = evstr
+        dframe['event_str'] = evstr
         dframe['next_state_str'] = ststr
         return dframe
 
@@ -653,10 +678,10 @@ class ControllerGUI(QGroupBox):
         
         # Get last event name if available
         if (self.controller and len(self.controller.events) > 0 and 
-            self.controller.state_matrix and self.controller.state_matrix.events_dict):
+            self.controller.state_matrix and self.controller.state_matrix.events):
             last_event_idx = self.controller.events[-1]
-            if last_event_idx in self.controller.state_matrix.events_dict.inverse:
-                self.last_event_name = self.controller.state_matrix.events_dict.inverse[last_event_idx]
+            if last_event_idx in self.controller.state_matrix.events.inverse:
+                self.last_event_name = self.controller.state_matrix.events.inverse[last_event_idx]
             else:
                 self.last_event_name = str(last_event_idx)
         else:

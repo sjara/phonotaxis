@@ -473,6 +473,10 @@ class TestGetEvents:
         ctrl.ready_to_start_trial()
         ctrl._on_event_processed(1, ctrl.start_time + 0.5, 1)
         
+        # Simulate state machine transitioning to state 0 (END) between trials
+        # This is necessary for force_state(1) to emit an event in trial 1
+        ctrl.state_machine.current_state = 0
+        
         # Trial 1 - ready_to_start_trial generates forced event (-1)
         ctrl.preparing_next_trial = True
         ctrl.ready_to_start_trial()
@@ -733,7 +737,7 @@ class TestEdgeCases:
         
         # This should work with state matrix
         df = ctrl.get_events(use_names=True)
-        assert 'events_str' in df.columns
+        assert 'event_str' in df.columns
         assert 'next_state_str' in df.columns
         
     def test_stop_before_start(self, qapp, basic_state_matrix):

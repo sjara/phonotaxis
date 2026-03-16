@@ -4,8 +4,8 @@ Configuration file for phonotaxis application in a specific rig.
 
 CAMERA_INDEX = 0
 
-HARDWARE_INTERFACE = 'arduino'  # Options: 'arduino', 'emulator'
-#HARDWARE_INTERFACE = 'emulator'  # Options: 'arduino', 'emulator'
+#HARDWARE_INTERFACE = 'arduino'  # Options: 'arduino', 'emulator'
+HARDWARE_INTERFACE = 'emulator'  # Options: 'arduino', 'emulator'
 
 ARDUINO_PORT = '/dev/ttyACM0' # COM4
 ARDUINO_SAMPLING_INTERVAL = 10  # in milliseconds

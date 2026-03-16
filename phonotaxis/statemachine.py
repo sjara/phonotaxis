@@ -9,16 +9,18 @@ The state machine operates on NumPy arrays that define:
 - State timers: how long to stay in each state before timeout
 - State outputs: what outputs to activate/deactivate in each state
 - Integer outputs: optional integer values to emit when entering states
+- Extra timers: optional independent timers triggered by states that persist across transitions
 
 Typical workflow:
     1. Create a StateMachine instance
     2. Configure it using set_state_matrix(), set_state_outputs(), set_state_timers()
     3. Optionally set integer outputs using set_integer_outputs()
-    4. Connect external signals to input events using connect_input_signal()
-    5. Connect to output signals (stateChanged, outputChanged, etc.)
-    6. Call start() to begin operation
-    7. Use force_state() to transition to the first behavioral state
-    8. The machine runs until stop() is called or END state is reached
+    4. Optionally set extra timers using set_extra_timers()
+    5. Connect external signals to input events using connect_input_signal()
+    6. Connect to output signals (stateChanged, outputChanged, etc.)
+    7. Call start() to begin operation
+    8. Use force_state() to transition to the first behavioral state
+    9. The machine runs until stop() is called or END state is reached
 
 Example:
     >>> sm = StateMachine()
@@ -69,12 +71,14 @@ class StateMachine(QtCore.QObject):
             bypassing normal state-based output control
         start(): Start the state machine (begins in END state)
         stop(): Stop the state machine
+        pause(): Pause event processing while continuing to log events with timestamps
+        resume(process_queued: bool): Resume event processing, optionally processing queued events
     
     Public Methods (to query state/events):
         get_current_state() -> int: Returns the current state index
         get_state_info() -> Dict: Returns comprehensive state machine information including
-            current_state, is_running, is_configured, num_states, num_inputs, num_outputs,
-            output_states, and state_timers
+            current_state, is_active, is_processing, is_configured, num_states, num_inputs, 
+            num_outputs, output_states, and state_timers
         get_output_state(output: int) -> bool: Returns current state of a specific output
         get_transitions_from_state(state: int) -> np.ndarray: Returns all possible next states
             from a given state for each input event
@@ -86,6 +90,7 @@ class StateMachine(QtCore.QObject):
     The state machine can handle:
     - Input events (from external PyQt signals via connect_input_signal())
     - State timers (automatic transitions after timeout)
+    - Extra timers (independent timers triggered by states that persist across transitions)
     - State outputs (signals emitted when entering states)
     - Forced state transitions (via force_state() or forceStateTransition signal)
     """
@@ -119,13 +124,21 @@ class StateMachine(QtCore.QObject):
         self.integer_outputs = None
         self.timer_event_index = None
         
+        # Extra timers (independent timers that persist across state transitions)
+        self.extra_timers_durations = None  # Duration for each extra timer
+        self.extra_timers_triggers = None   # Which state triggers each extra timer
+        self.extra_timers = []  # List of QTimer objects for extra timers
+        self.num_extra_timers = 0
+        
         self.num_states = 0
         self.num_inputs = 0
         self.num_outputs = 0
         
         # State machine state
         self.current_state = 0
-        self.is_running = False
+        self.is_active = False  # State machine is started/operational vs stopped
+        self.is_processing = False  # Events are being processed vs suspended (default False until started)
+        self.suspended_events = []  # Store (event_index, timestamp) tuples during suspension
         self.output_states = []
         
         # Timer for state timeouts
@@ -152,12 +165,12 @@ class StateMachine(QtCore.QObject):
                               If None, assumes the last column is the timer event.
         
         Raises:
-            RuntimeError: If state machine is currently running
+            RuntimeError: If state machine is currently processing events
             TypeError: If state_matrix is not a NumPy array
             ValueError: If state_matrix is empty, not 2D, or contains invalid state indices
         """
-        if self.is_running:
-            raise RuntimeError("Cannot modify state matrix while state machine is running")
+        if self.is_processing:
+            raise RuntimeError("Cannot modify state matrix while state machine is processing events")
             
         # Validate that input is a NumPy array
         if not isinstance(state_matrix, np.ndarray):
@@ -210,7 +223,7 @@ class StateMachine(QtCore.QObject):
             state_timers: 1D NumPy array of timer durations for each state (seconds).
         
         Raises:
-            RuntimeError: If state machine is currently running
+            RuntimeError: If state machine is currently active
             TypeError: If state_timers is not a NumPy array
             ValueError: If state_timers is not 1D or length doesn't match number of states
         
@@ -220,8 +233,8 @@ class StateMachine(QtCore.QObject):
             rounded to the nearest integer. For sub-millisecond precision, consider
             alternative timing mechanisms.
         """
-        if self.is_running:
-            raise RuntimeError("Cannot modify state timers while state machine is running")
+        if self.is_processing:
+            raise RuntimeError("Cannot modify state timers while state machine is processing events")
             
         # Validate that input is a NumPy array
         if not isinstance(state_timers, np.ndarray):
@@ -249,13 +262,13 @@ class StateMachine(QtCore.QObject):
                           Values: 0 (off), 1 (on), -1 (no change)
         
         Raises:
-            RuntimeError: If state machine is currently running
+            RuntimeError: If state machine is currently processing events
             TypeError: If state_outputs is not a NumPy array
             ValueError: If state_outputs is not 2D, has mismatched rows with state matrix,
                        or contains values other than -1, 0, or 1
         """
-        if self.is_running:
-            raise RuntimeError("Cannot modify state outputs while state machine is running")
+        if self.is_processing:
+            raise RuntimeError("Cannot modify state outputs while state machine is processing events")
             
         # Validate that input is a NumPy array
         if not isinstance(state_outputs, np.ndarray):
@@ -297,12 +310,12 @@ class StateMachine(QtCore.QObject):
                            A value of 0 means no integer output signal is emitted.
         
         Raises:
-            RuntimeError: If state machine is running
+            RuntimeError: If state machine is processing events
             TypeError: If integer_outputs is not a NumPy array
             ValueError: If integer_outputs dimension or size is invalid
         """
-        if self.is_running:
-            raise RuntimeError("Cannot modify integer outputs while state machine is running")
+        if self.is_processing:
+            raise RuntimeError("Cannot modify integer outputs while state machine is processing events")
             
         # Validate that input is a NumPy array
         if not isinstance(integer_outputs, np.ndarray):
@@ -314,16 +327,101 @@ class StateMachine(QtCore.QObject):
             raise ValueError("Integer outputs must have same length as number of states")
             
         self.integer_outputs = integer_outputs.astype(np.int32)
+        
+    def set_extra_timers(self, extra_timers_durations: np.ndarray, 
+                        extra_timers_triggers: np.ndarray) -> None:
+        """
+        Set the extra timers for the state machine.
+        
+        Extra timers are independent timers that can be triggered by specific states
+        and continue running across state transitions (unlike state timers which reset
+        on each state entry). When an extra timer expires, it generates an event that
+        can cause state transitions.
+        
+        Each extra timer can only be triggered by one specific state. When that state
+        is entered, the timer starts. The timer continues running even after leaving
+        that state, and when it expires, it generates an event based on its position
+        in the events dictionary (after the standard input events and state timer event).
+        
+        Args:
+            extra_timers_durations: 1D NumPy array of timer durations in seconds.
+            extra_timers_triggers: 1D NumPy array of state indices that trigger each timer.
+        
+        Raises:
+            RuntimeError: If state machine is processing events
+            TypeError: If inputs are not NumPy arrays
+            ValueError: If arrays are not 1D, have different lengths, or contain invalid values
+        
+        Example:
+            >>> # Two extra timers: timer1 triggered by state 2, timer2 by state 3
+            >>> sm.set_extra_timers(
+            ...     extra_timers_durations=np.array([5.0, 10.0]),
+            ...     extra_timers_triggers=np.array([2, 3])
+            ... )
+        """
+        if self.is_processing:
+            raise RuntimeError("Cannot modify extra timers while state machine is processing events")
+            
+        # Validate that inputs are NumPy arrays
+        if not isinstance(extra_timers_durations, np.ndarray):
+            raise TypeError("extra_timers_durations must be a NumPy array")
+        if not isinstance(extra_timers_triggers, np.ndarray):
+            raise TypeError("extra_timers_triggers must be a NumPy array")
+            
+        # Validate dimensions
+        if extra_timers_durations.ndim != 1:
+            raise ValueError("Extra timers durations must be 1-dimensional")
+        if extra_timers_triggers.ndim != 1:
+            raise ValueError("Extra timers triggers must be 1-dimensional")
+            
+        # Validate matching lengths
+        if len(extra_timers_durations) != len(extra_timers_triggers):
+            raise ValueError("Extra timers durations and triggers must have the same length")
+            
+        # Store with proper dtypes
+        self.extra_timers_durations = extra_timers_durations.astype(np.float64)
+        self.extra_timers_triggers = extra_timers_triggers.astype(np.int32)
+        self.num_extra_timers = len(extra_timers_durations)
+        
+        # Validate trigger state indices
+        if self.state_matrix is not None:
+            # if np.any(self.extra_timers_triggers < 0) or np.any(self.extra_timers_triggers >= self.num_states):
+            if np.any(self.extra_timers_triggers >= self.num_states):
+                raise ValueError(f"Extra timer triggers contain invalid state indices. Must be 0 to {self.num_states-1}")
+        
+        # Create QTimer objects for each extra timer
+        self._create_extra_timer_objects()
+    
+    def _create_extra_timer_objects(self) -> None:
+        """
+        Create QTimer objects for each extra timer.
+        
+        This internal method creates one QTimer per extra timer and connects
+        each to its corresponding expiration handler. All timers are single-shot.
+        """
+        # Stop and delete any existing extra timers
+        for timer in self.extra_timers:
+            timer.stop()
+            timer.deleteLater()
+        self.extra_timers = []
+        
+        # Create new timer objects
+        for i in range(self.num_extra_timers):
+            timer = QtCore.QTimer()
+            timer.setSingleShot(True)
+            # Use lambda with default argument to capture current index
+            timer.timeout.connect(lambda idx=i: self._on_extra_timer_expired(idx))
+            self.extra_timers.append(timer)
     
     def reset(self) -> None:
         """
         Reset the state machine to empty state.
         
         This clears all configuration (state matrix, outputs, timers) and stops
-        the state machine if it's running.
+        the state machine if it's active.
         """
-        # Stop the state machine if running
-        if self.is_running:
+        # Stop the state machine if active
+        if self.is_active:
             self.stop()
             
         # Reset all configuration
@@ -332,6 +430,15 @@ class StateMachine(QtCore.QObject):
         self.state_timers = None
         self.integer_outputs = None
         self.timer_event_index = None
+        
+        # Reset extra timers
+        for timer in self.extra_timers:
+            timer.stop()
+            timer.deleteLater()
+        self.extra_timers = []
+        self.extra_timers_durations = None
+        self.extra_timers_triggers = None
+        self.num_extra_timers = 0
         
         self.num_states = 0
         self.num_inputs = 0
@@ -367,7 +474,8 @@ class StateMachine(QtCore.QObject):
             raise RuntimeError("State machine must be configured before starting. "
                              "Use set_state_matrix() and set_state_outputs() first.")
             
-        self.is_running = True
+        self.is_active = True
+        self.is_processing = True
         # Always start at state 0 (END/waiting state)
         self.current_state = 0
         
@@ -375,12 +483,65 @@ class StateMachine(QtCore.QObject):
         """
         Stop the state machine.
         
-        Stops the state machine from processing events and cancels any active state timer.
-        The current state and output values are preserved and can be inspected after
-        stopping. The state machine can be restarted with start().
+        Stops the state machine from processing events and cancels any active state timer
+        and all extra timers. The current state and output values are preserved and can
+        be inspected after stopping. The state machine can be restarted with start().
         """
-        self.is_running = False
+        self.is_active = False
+        self.is_processing = False  # Reset to default (not processing when stopped)
+        self.suspended_events.clear()
         self.state_timer.stop()
+        # Stop all extra timers
+        for timer in self.extra_timers:
+            timer.stop()
+            
+    def pause(self) -> None:
+        """
+        Suspend event processing while continuing to log events.
+        
+        When processing is suspended, the state machine continues to log events (via 
+        eventProcessed signal) with accurate timestamps, but defers state transitions. 
+        Events are stored and will be processed in order when resume() is called.
+        
+        Useful for temporarily suspending state transitions while maintaining event logging,
+        such as during trial preparation in behavioral experiments.
+        
+        Raises:
+            RuntimeError: If state machine is not active
+            
+        Note:
+            State and extra timers continue running during suspension. If a timer expires 
+            while suspended, it will be queued like any other event.
+        """
+        if not self.is_active:
+            raise RuntimeError("Cannot pause: state machine is not active")
+        self.is_processing = False
+        
+    def resume(self, process_queued: bool = True) -> None:
+        """
+        Resume event processing after suspension.
+        
+        Args:
+            process_queued: If True (default), process all events that occurred during
+                          suspension in the order they occurred. If False, discard queued events.
+        
+        Raises:
+            RuntimeError: If state machine is not active or already processing
+        """
+        if not self.is_active:
+            raise RuntimeError("Cannot resume: state machine is not active")
+        if self.is_processing:
+            raise RuntimeError("Cannot resume: state machine is already processing events")
+            
+        self.is_processing = True
+        
+        if process_queued:
+            # Process all queued events in order
+            for event_idx, original_timestamp in self.suspended_events:
+                # Process the event with its original timestamp preserved
+                self._process_event(event_idx, original_timestamp)
+        
+        self.suspended_events.clear()
                    
     def process_input(self, input_event: int) -> None:
         """
@@ -388,8 +549,11 @@ class StateMachine(QtCore.QObject):
         
         Looks up the next state from the state matrix based on the current state
         and input event, then transitions to that state if it's different from
-        the current state. If the state machine is not running, this method
+        the current state. If the state machine is not active, this method
         returns immediately without doing anything.
+        
+        If event processing is suspended, the event is logged with its timestamp
+        and queued for processing when resume() is called.
         
         Args:
             input_event: Input event index
@@ -399,10 +563,10 @@ class StateMachine(QtCore.QObject):
             ValueError: If input_event index is invalid
         
         Note:
-            This method is a no-op if the state machine is not running (i.e., 
+            This method is a no-op if the state machine is not active (i.e., 
             before start() is called or after stop() is called).
         """
-        if not self.is_running:
+        if not self.is_active:
             return
             
         if not self.is_configured():
@@ -413,6 +577,17 @@ class StateMachine(QtCore.QObject):
             
         if self.debug:
             print(f"{PREFIX} Processing input event {input_event} in state {self.current_state}")
+        
+        # If processing is suspended, queue the event for later processing
+        if not self.is_processing:
+            timestamp = time.time()
+            self.suspended_events.append((input_event, timestamp))
+            # Still emit signal so event is logged
+            next_state = self.state_matrix[self.current_state, input_event]
+            self.eventProcessed.emit(input_event, timestamp, next_state)
+            if self.debug:
+                print(f"{PREFIX} Event {input_event} queued during suspension (would go to state {next_state})")
+            return
             
         # Delegate to unified event processing method
         self._process_event(input_event)
@@ -490,7 +665,7 @@ class StateMachine(QtCore.QObject):
         self.state_timers[state] = duration
         
         # If we're currently in this state, restart the timer
-        if state == self.current_state and self.is_running:
+        if state == self.current_state and self.is_active:
             self._start_state_timer()
             
     def force_state(self, state_index: int) -> None:
@@ -519,8 +694,8 @@ class StateMachine(QtCore.QObject):
         if not (0 <= state_index < self.num_states):
             raise ValueError(f"Invalid state index: {state_index}")
             
-        # Only transition if we're running and it's a different state
-        if self.is_running and state_index != self.current_state:
+        # Only transition if we're active and it's a different state
+        if self.is_active and state_index != self.current_state:
             # Emit eventProcessed signal for forced transitions with event ID -1
             timestamp = time.time()
             self.eventProcessed.emit(-1, timestamp, state_index)
@@ -566,7 +741,7 @@ class StateMachine(QtCore.QObject):
             
         self.current_state = state_index
         
-        # Stop current timer
+        # Stop current state timer
         self.state_timer.stop()
          
         # Process outputs for new state
@@ -577,6 +752,9 @@ class StateMachine(QtCore.QObject):
 
         # Start new state timer
         self._start_state_timer()
+        
+        # Start any extra timers triggered by this state
+        self._start_extra_timers_for_state(state_index)
         
         # Emit state change signal
         self.stateChanged.emit(self.current_state)
@@ -623,12 +801,83 @@ class StateMachine(QtCore.QObject):
             
     def _on_state_timer_expired(self) -> None:
         """Handle state timer expiration as a special input event."""
-        if not self.is_running or not self.is_configured():
+        if not self.is_active or not self.is_configured():
             return
+        
+        # If processing is suspended, queue the timer event just like input events
+        if not self.is_processing:
+            timestamp = time.time()
+            self.suspended_events.append((self.timer_event_index, timestamp))
+            # Still emit signal so event is logged
+            next_state = self.state_matrix[self.current_state, self.timer_event_index]
+            self.eventProcessed.emit(self.timer_event_index, timestamp, next_state)
+            if self.debug:
+                print(f"{PREFIX} State timer event queued during suspension (would go to state {next_state})")
+            return
+            
         # Delegate to unified event processing method using timer event index
         self._process_event(self.timer_event_index)
         
-    def _process_event(self, event_index: int) -> None:
+    def _start_extra_timers_for_state(self, state_index: int) -> None:
+        """
+        Start any extra timers that are triggered by the given state.
+        
+        Args:
+            state_index: State that was just entered
+        """
+        if self.extra_timers_triggers is None:
+            return
+            
+        # Find which extra timers are triggered by this state
+        for timer_idx in range(self.num_extra_timers):
+            if self.extra_timers_triggers[timer_idx] == state_index:
+                duration = self.extra_timers_durations[timer_idx]
+                if duration >= 0 and duration != float('inf'):
+                    # Start this extra timer
+                    self.extra_timers[timer_idx].start(round(duration * 1000))
+                    if self.debug:
+                        print(f"{PREFIX} Started extra timer {timer_idx} with duration {duration}s")
+                        
+    def _on_extra_timer_expired(self, timer_idx: int) -> None:
+        """
+        Handle extra timer expiration.
+        
+        When an extra timer expires, it generates an event whose index is calculated
+        based on the timer's position: n_input_events + timer_idx. This follows the
+        convention from statematrix where extra timer events come after all input
+        events and the state timer event.
+        
+        Args:
+            timer_idx: Index of the extra timer that expired
+        """
+        if not self.is_active or not self.is_configured():
+            return
+            
+        # Calculate the event index for this extra timer
+        # Extra timer events come after all regular input events (including state timer)
+        # In statematrix: n_input_events includes input events + 'Tup'
+        # So extra timer i has event index: n_input_events + i
+        # Since timer_event_index points to 'Tup', and extra timers come after:
+        extra_timer_event_index = self.timer_event_index + 1 + timer_idx
+        
+        if self.debug:
+            print(f"{PREFIX} Extra timer {timer_idx} expired, processing event {extra_timer_event_index}")
+        
+        # If processing is suspended, queue the extra timer event just like other events
+        if not self.is_processing:
+            timestamp = time.time()
+            self.suspended_events.append((extra_timer_event_index, timestamp))
+            # Still emit signal so event is logged
+            next_state = self.state_matrix[self.current_state, extra_timer_event_index]
+            self.eventProcessed.emit(extra_timer_event_index, timestamp, next_state)
+            if self.debug:
+                print(f"{PREFIX} Extra timer {timer_idx} event queued during suspension (would go to state {next_state})")
+            return
+            
+        # Process this as an event
+        self._process_event(extra_timer_event_index)
+        
+    def _process_event(self, event_index: int, timestamp: Optional[float] = None) -> None:
         """
         Unified method to process any event (input or timer) and potentially transition to a new state.
         
@@ -640,9 +889,12 @@ class StateMachine(QtCore.QObject):
         
         Args:
             event_index: Index of the event (input or timer) being processed
+            timestamp: Optional timestamp to use (for replaying queued events). If None,
+                      uses current time.
         """
-        # Record the timestamp when event is processed
-        timestamp = time.time()
+        # Record the timestamp when event is processed (or use provided timestamp)
+        if timestamp is None:
+            timestamp = time.time()
         
         # Get next state from state matrix
         next_state = self.state_matrix[self.current_state, event_index]
@@ -662,7 +914,7 @@ class StateMachine(QtCore.QObject):
         if not (0 <= state_index < self.num_states):
             return  # Silently ignore invalid states when called via signal
             
-        if self.is_running and state_index != self.current_state:
+        if self.is_active and state_index != self.current_state:
             self._enter_state(state_index)
         
     def get_state_info(self) -> Dict[str, Any]:
@@ -672,7 +924,8 @@ class StateMachine(QtCore.QObject):
         Returns:
             Dictionary with state machine information containing:
                 - 'current_state' (int): Index of the current state
-                - 'is_running' (bool): Whether the state machine is running
+                - 'is_active' (bool): Whether the state machine is active
+                - 'is_processing' (bool): Whether events are being processed
                 - 'is_configured' (bool): Whether the state machine is fully configured
                 - 'num_states' (int): Total number of states
                 - 'num_inputs' (int): Total number of input events
@@ -682,7 +935,8 @@ class StateMachine(QtCore.QObject):
         """
         return {
             'current_state': self.current_state,
-            'is_running': self.is_running,
+            'is_active': self.is_active,
+            'is_processing': self.is_processing,
             'is_configured': self.is_configured(),
             'num_states': self.num_states,
             'num_inputs': self.num_inputs,
@@ -766,7 +1020,7 @@ class StateMachine(QtCore.QObject):
         lines = [
             f"StateMachine: {self.num_states} states, {self.num_inputs} inputs, {self.num_outputs} outputs",
             f"Current state: {self.current_state}",
-            f"Running: {self.is_running}",
+            f"Active: {self.is_active}, Processing: {self.is_processing}",
             "",
             "State Matrix:"
         ]

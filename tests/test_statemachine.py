@@ -57,7 +57,8 @@ class TestStateMachineInit:
         assert sm.num_inputs == 0
         assert sm.num_outputs == 0
         assert sm.current_state == 0
-        assert sm.is_running is False
+        assert sm.is_active is False
+        assert sm.is_processing is False
         assert sm.output_states == []
         
     def test_init_with_debug(self):
@@ -160,7 +161,7 @@ class TestSetStateMatrix:
         sm.start()
         
         new_matrix = np.array([[0]], dtype=np.int32)
-        with pytest.raises(RuntimeError, match="while state machine is running"):
+        with pytest.raises(RuntimeError, match="processing events"):
             sm.set_state_matrix(new_matrix)
             
         sm.stop()
@@ -225,7 +226,7 @@ class TestSetStateTimers:
         sm.set_state_timers(timers)
         sm.start()
         
-        with pytest.raises(RuntimeError, match="while state machine is running"):
+        with pytest.raises(RuntimeError, match="processing events"):
             sm.set_state_timers(np.array([2.0, 3.0]))
             
         sm.stop()
@@ -302,7 +303,7 @@ class TestSetStateOutputs:
         
         new_outputs = np.array([[0, 0],
                                [1, 0]], dtype=np.int32)
-        with pytest.raises(RuntimeError, match="while state machine is running"):
+        with pytest.raises(RuntimeError, match="processing events"):
             sm.set_state_outputs(new_outputs)
             
         sm.stop()
@@ -359,7 +360,7 @@ class TestSetIntegerOutputs:
         sm.set_state_timers(timers)
         sm.start()
         
-        with pytest.raises(RuntimeError, match="while state machine is running"):
+        with pytest.raises(RuntimeError, match="processing events"):
             sm.set_integer_outputs(np.array([0, 5]))
             
         sm.stop()
@@ -388,7 +389,8 @@ class TestStartStop:
         sm.set_state_timers(timers)
         sm.start()
         
-        assert sm.is_running is True
+        assert sm.is_active is True
+        assert sm.is_processing is True
         assert sm.current_state == 0  # Always starts at state 0
         
         sm.stop()
@@ -408,7 +410,8 @@ class TestStartStop:
         sm.start()
         sm.stop()
         
-        assert sm.is_running is False
+        assert sm.is_active is False
+        assert sm.is_processing is False
         
     def test_is_configured(self):
         """Test is_configured method."""
@@ -471,9 +474,9 @@ class TestReset:
         sm.set_state_timers(timers)
         sm.start()
         
-        assert sm.is_running is True
+        assert sm.is_active is True
         sm.reset()
-        assert sm.is_running is False
+        assert sm.is_active is False
 
 
 class TestProcessInput:
@@ -532,7 +535,7 @@ class TestProcessInput:
     def test_process_input_unconfigured(self):
         """Test that processing input on unconfigured machine raises error."""
         sm = statemachine.StateMachine()
-        sm.is_running = True  # Force running state
+        sm.is_active = True  # Force active state
         
         with pytest.raises(RuntimeError, match="not configured"):
             sm.process_input(0)
@@ -1140,7 +1143,8 @@ class TestQueryMethods:
         info = sm.get_state_info()
         
         assert info['current_state'] == 0
-        assert info['is_running'] is True
+        assert info['is_active'] is True
+        assert info['is_processing'] is True
         assert info['is_configured'] is True
         assert info['num_states'] == 2
         assert info['num_inputs'] == 2
@@ -1287,6 +1291,164 @@ class TestStringRepresentation:
         assert "2 outputs" in s
         assert "State Matrix:" in s
         assert "State Outputs:" in s
+
+
+class TestPauseResume:
+    """Tests for pause and resume methods."""
+
+    def test_pause_suspends_processing(self, qapp):
+        """Test that pause suspends event processing."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+        sm.start()
+        sm.force_state(1)
+        qapp.processEvents()
+
+        sm.pause()
+        assert sm.is_active is True
+        assert sm.is_processing is False
+
+        # Events sent while paused should not cause a state transition
+        sm.process_input(1)  # Would go to state 0 if processing
+        qapp.processEvents()
+        assert sm.current_state == 1  # Still in state 1
+
+        sm.stop()
+
+    def test_pause_queues_events(self, qapp):
+        """Test that events received while paused are queued."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+        sm.start()
+        sm.force_state(1)
+        qapp.processEvents()
+
+        sm.pause()
+        sm.process_input(1)
+        assert len(sm.suspended_events) == 1
+        assert sm.suspended_events[0][0] == 1  # event index
+
+        sm.stop()
+
+    def test_resume_processes_queued_events(self, qapp):
+        """Test that resume processes events queued during pause."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+        sm.start()
+        sm.force_state(1)
+        qapp.processEvents()
+
+        sm.pause()
+        sm.process_input(1)  # queued: would transition to state 0
+        assert sm.current_state == 1  # not yet processed
+
+        sm.resume()
+        qapp.processEvents()
+        assert sm.current_state == 0  # now processed
+        assert sm.is_processing is True
+
+        sm.stop()
+
+    def test_resume_discard_queued_events(self, qapp):
+        """Test that resume with process_queued=False discards queued events."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+        sm.start()
+        sm.force_state(1)
+        qapp.processEvents()
+
+        sm.pause()
+        sm.process_input(1)  # queued
+
+        sm.resume(process_queued=False)
+        qapp.processEvents()
+        assert sm.current_state == 1  # event discarded, still in state 1
+        assert sm.is_processing is True
+
+        sm.stop()
+
+    def test_pause_not_active_raises(self):
+        """Test that pausing an inactive machine raises RuntimeError."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+
+        with pytest.raises(RuntimeError, match="not active"):
+            sm.pause()
+
+    def test_resume_not_active_raises(self):
+        """Test that resuming an inactive machine raises RuntimeError."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+
+        with pytest.raises(RuntimeError, match="not active"):
+            sm.resume()
+
+    def test_resume_already_processing_raises(self):
+        """Test that resuming while already processing raises RuntimeError."""
+        sm = statemachine.StateMachine()
+        matrix = np.array([[0, 0],
+                          [1, 0]], dtype=np.int32)
+        outputs = np.array([[0, 0],
+                           [0, 1]], dtype=np.int32)
+        timers = np.array([float('inf'), float('inf')])
+
+        sm.set_state_matrix(matrix)
+        sm.set_state_outputs(outputs)
+        sm.set_state_timers(timers)
+        sm.start()
+
+        with pytest.raises(RuntimeError, match="already processing"):
+            sm.resume()
+
+        sm.stop()
 
 
 class TestComplexScenarios:

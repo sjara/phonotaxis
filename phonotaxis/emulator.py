@@ -406,15 +406,15 @@ def create_emulator_from_state_matrix(state_matrix):
     needed to connect to a state machine.
     
     Args:
-        state_matrix: StateMatrix object with inputs_dict and outputs_dict
+        state_matrix: StateMatrix object with inputs and outputs
         
     Returns:
         Tuple of (EmulatorWidget, event_mapping) where event_mapping maps
         emulator events to state matrix events
     """
     # Extract input and output names
-    inputs = list(state_matrix.inputs_dict.keys()) if hasattr(state_matrix, 'inputs_dict') else []
-    outputs = list(state_matrix.outputs_dict.keys()) if hasattr(state_matrix, 'outputs_dict') else []
+    inputs = list(state_matrix.inputs.keys()) if hasattr(state_matrix, 'inputs') else []
+    outputs = list(state_matrix.outputs.keys()) if hasattr(state_matrix, 'outputs') else []
     
     # Create emulator
     emulator = EmulatorWidget(inputs=inputs, outputs=outputs)

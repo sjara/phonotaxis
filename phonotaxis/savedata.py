@@ -47,7 +47,7 @@ class SaveData(QGroupBox):
         self.setTitle('Manage Data')
 
     def to_file(self, containers, currentTrial=None, subject='subject',
-                paradigm='paradigm', date=None, suffix='a', filepath=None):
+                paradigm='paradigm', date=None, suffix='_01', filepath=None):
         """
         Saves the history of parameters, events and results to an HDF5 file.
 
@@ -65,8 +65,8 @@ class SaveData(QGroupBox):
             filepath: (optional) string with full path. If a filepath is given,
                 all other string parameters will be ignored.
 
-        The data is saved to:
-        ``datadir/subject/subject_paradigm_YYMMDDa.h5``
+        By default, the data is saved to:
+        ``datadir/subject/subject_paradigm_YYMMDD_01.h5``
         
         Note:
             All containers must implement append_to_file(h5file) with a single
