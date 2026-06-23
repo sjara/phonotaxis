@@ -9,7 +9,20 @@ Modules for developing sound localization tasks that use video tracking.
         * `conda env create -f environment.yml`
         * `conda activate phonotaxis`
         * The prompt should now say `(phonotaxis)`, indicating you are in the environment.
-    * **Linux (Ubuntu):** using [uv](https://github.com/astral-sh/uv).
+    * **Linux (Ubuntu):** using `virtualenvwrapper`.
+        * Install it: `sudo apt install virtualenvwrapper`
+        * Add the following to your `~/.bashrc` (if not already there):
+          ```bash
+          export WORKON_HOME=$HOME/.virtualenvs
+          source /usr/share/virtualenvwrapper/virtualenvwrapper.sh
+          ```
+        * Open a new terminal or run `source ~/.bashrc`.
+        * Create the environment: `mkvirtualenv phonotaxis`
+          * This also activates it; the prompt should now say `(phonotaxis)`.
+        * From the `phonotaxis` folder, install the package and its dependencies:
+          `pip install -e .`
+        * Next time, just run `workon phonotaxis` to activate it again.
+    * **Linux (Ubuntu), alternative:** using [uv](https://github.com/astral-sh/uv).
         * Install pipx: `sudo apt install pipx`
         * Install uv (without running a shell script from the web):
           `pipx install uv`
