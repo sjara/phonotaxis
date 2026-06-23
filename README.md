@@ -1,5 +1,5 @@
 # phonotaxis
-Modules for developing sound localization tasks that use video tracking.
+A framework for developing behavioral tasks that use video tracking and sound playback.
 
 ## INSTALLATION
 1. Clone the repo:
