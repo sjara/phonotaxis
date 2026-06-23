@@ -4,11 +4,17 @@ Modules for developing sound localization tasks that use video tracking.
 ## INSTALLATION
 1. Clone the repo:
     * `git clone https://github.com/sjara/phonotaxis.git`
-2. Go to the `phonotaxis` folder, and create a conda environment for this package:
-    * `conda env create -f environment.yml`
-3. Activate the environment:
-    * `conda activate phonotaxis`
-    * The prompt should now say `(phonotaxis)`, indicating you are in the environment.
+2. Create and activate an environment for this package:
+    * **Windows:** using conda.
+        * `conda env create -f environment.yml`
+        * `conda activate phonotaxis`
+        * The prompt should now say `(phonotaxis)`, indicating you are in the environment.
+    * **Linux (Ubuntu):** using [uv](https://github.com/astral-sh/uv).
+        * Install pipx: `sudo apt install pipx`
+        * Install uv (without running a shell script from the web):
+          `pipx install uv`
+        * From the `phonotaxis` folder: `uv venv` then `source .venv/bin/activate`.
+        * Install the package and its dependencies: `uv pip install -e .`
 4. Create a config file (based on the template):
     * Make a copy of `config_template.py` and call it `config.py`.
     * Edit your config.py file if necessary.

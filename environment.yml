@@ -5,10 +5,11 @@ channels:
 dependencies:
   - python>=3.9
   - pyqt>=6
-  - python-sounddevice
   - pip
   - pip:
       # Use pip to install your project itself, and any dependencies not on conda-forge
       - -e .  # This installs your project in editable mode
 
-# You may need to install opencv-python from pip by yourself
+# If pip fails to install sounddevice or opencv-python (e.g. on Windows, due to
+# their native/binary dependencies), try installing them via conda-forge instead:
+#   conda install -c conda-forge python-sounddevice opencv

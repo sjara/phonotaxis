@@ -28,5 +28,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-qt",
+]
+
 [tool.setuptools.packages.find]
 include = ["phonotaxis"]
