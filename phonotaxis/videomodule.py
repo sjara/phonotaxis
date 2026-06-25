@@ -10,6 +10,9 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QObject
+import threading
+from .sharedbuffer import SharedFrameBuffer, ResultBuffer
+from .videoworkers import CaptureWorker, ProcessWorker, RecordWorker
 
 # --- Configuration ---
 #FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
@@ -47,16 +50,12 @@ class VideoThread(QThread):
         self.cap = None
         self.out = None # Initialize video writer to None
         self.fps = None
-        self.mode = mode
+        self._mode = mode
         self.tracking = tracking
         self.recording_status = False  # Whether video recording is active
         self.filepath = None  # Path to save the video output, if any
         self.threshold = DEFAULT_BLACK_THRESHOLD  # Default threshold for detecting dark objects
         self.minarea = DEFAULT_MINIMUM_AREA  # Default minimum area of object to track
-
-        # MASK masking parameters
-        self.mask_enabled = False  # Whether to apply MASK masking
-        self.mask_coords = None  # List of coordinates: [x1,y1,x2,y2] for rectangular or [cx,cy,radius] for circular
 
         # Store tracking
         self.timestamps = []
@@ -64,61 +63,76 @@ class VideoThread(QThread):
 
         self.debug = debug
         self.initialize_camera()
-        #if self.save_to is not None:
-        #    if not os.path.exists(os.path.dirname(self.save_to)):
-        #        os.makedirs(os.path.dirname(self.save_to))
-        #self.initialize_video_writer()
+        
+        # Setup buffers and workers
+        if self.cap and self.cap.isOpened():
+            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frame_shape = (frame_height, frame_width)
+            
+            # Create buffers
+            self.raw_buffer = SharedFrameBuffer(capacity=8, frame_shape=frame_shape, dtype=np.uint8)
+            self.result_buffer = ResultBuffer()
+            self.record_buffer = SharedFrameBuffer(capacity=30, frame_shape=frame_shape, dtype=np.uint8)
+            
+            self.process_workers = []
+            
+            # Setup primary worker
+            primary_worker = ProcessWorker(self.raw_buffer, self.result_buffer, 
+                                           self.threshold, self.minarea, tracking=self.tracking)
+            primary_worker.mode = self._mode
+            self.process_workers.append(primary_worker)
+            
+            # Setup capture and record workers
+            self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_buffer)
+            self.record_worker = RecordWorker(self.record_buffer)
+        
+        # We will keep track of threads here
+        self._capture_thread = None
+        self._process_threads = []
+        self._record_thread = None
+
+    @property
+    def mask_coords(self):
+        if hasattr(self, 'process_workers') and self.process_workers:
+            return self.process_workers[0].mask_coords
+        return None
+
+    @property
+    def mask_enabled(self):
+        if hasattr(self, 'process_workers') and self.process_workers:
+            return self.process_workers[0].mask_enabled
+        return False
 
     def set_threshold(self, threshold):
         self.threshold = threshold
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].threshold = threshold
         
     def set_minarea(self, minarea):
         self.minarea = minarea
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].minarea = minarea
 
     def set_circular_mask(self, coords):
-        """
-        Set circular region of interest for masking.
-        Only pixels inside this circle will be considered for object detection.
-        
-        Args:
-            coords (list): [center_x, center_y, radius] - center coordinates and radius of the circular mask
-        """
         if len(coords) != 3:
             raise ValueError("Circular mask requires exactly 3 coordinates: [center_x, center_y, radius]")
-        
-        self.mask_coords = coords
-        self.mask_enabled = True
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].set_circular_mask(coords)
         if self.debug:
             center_x, center_y, radius = coords
             print(f"Circular MASK set: center ({center_x}, {center_y}), radius {radius}")
 
     def set_rectangular_mask(self, coords):
-        """
-        Set rectangular region of interest for masking.
-        Only pixels inside this rectangle will be considered for object detection.
-        
-        Args:
-            coords (list): [x1, y1, x2, y2] - top-left and bottom-right coordinates of the rectangle
-        """
         if len(coords) != 4:
             raise ValueError("Rectangular mask requires exactly 4 coordinates: [x1, y1, x2, y2]")
-        
-        self.mask_coords = coords
-        self.mask_enabled = True
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].set_rectangular_mask(coords)
         if self.debug:
             x1, y1, x2, y2 = coords
             print(f"Rectangular MASK set: ({x1}, {y1}) to ({x2}, {y2})")
 
     def set_rectangular_mask_from_center(self, center_x, center_y, width, height):
-        """
-        Set rectangular MASK from center point and dimensions.
-        
-        Args:
-            center_x (int): Center x coordinate
-            center_y (int): Center y coordinate
-            width (int): Width of the rectangle
-            height (int): Height of the rectangle
-        """
         half_width = width // 2
         half_height = height // 2
         x1 = max(0, center_x - half_width)
@@ -128,52 +142,64 @@ class VideoThread(QThread):
         self.set_rectangular_mask([x1, y1, x2, y2])
 
     def disable_mask(self):
-        """Disable MASK masking - use the full frame for object detection."""
-        self.mask_enabled = False
-        self.mask_coords = None
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].disable_mask()
         if self.debug:
             print("MASK masking disabled")
 
     def get_mask(self):
-        """
-        Get current MASK settings.
-        
-        Returns:
-            dict: Dictionary with MASK parameters or None if disabled
-        """
-        if not self.mask_enabled or self.mask_coords is None:
+        if not hasattr(self, 'process_workers') or not self.process_workers:
+            return None
+        pw = self.process_workers[0]
+        if not pw.mask_enabled or pw.mask_coords is None:
             return None
         
-        if len(self.mask_coords) == 3:
-            # Circular mask
-            center_x, center_y, radius = self.mask_coords
+        if len(pw.mask_coords) == 3:
+            center_x, center_y, radius = pw.mask_coords
             return {
                 'type': 'circular',
-                'coords': self.mask_coords,
+                'coords': pw.mask_coords,
                 'center_x': center_x,
                 'center_y': center_y,
                 'radius': radius,
-                'enabled': self.mask_enabled
+                'enabled': pw.mask_enabled
             }
-        elif len(self.mask_coords) == 4:
-            # Rectangular mask
-            x1, y1, x2, y2 = self.mask_coords
+        elif len(pw.mask_coords) == 4:
+            x1, y1, x2, y2 = pw.mask_coords
             return {
                 'type': 'rectangular',
-                'coords': self.mask_coords,
+                'coords': pw.mask_coords,
                 'x1': x1,
                 'y1': y1,
                 'x2': x2,
                 'y2': y2,
-                'enabled': self.mask_enabled
+                'enabled': pw.mask_enabled
             }
         else:
             return None
 
-    def set_mode(self, mode):
-        if mode not in ['grayscale', 'binary']:
+    @property
+    def mode(self):
+        if hasattr(self, 'process_workers') and self.process_workers:
+            return self.process_workers[0].mode
+        return self._mode
+        
+    @mode.setter
+    def mode(self, mode_val):
+        if mode_val not in ['grayscale', 'binary']:
             raise ValueError("Mode must be 'grayscale' or 'binary'.")
-        self.mode = mode
+        self._mode = mode_val
+        if hasattr(self, 'process_workers') and self.process_workers:
+            self.process_workers[0].mode = mode_val
+
+    def set_mode(self, mode_val):
+        self.mode = mode_val
+            
+    def add_process_worker(self, worker):
+        """Registers an additional ProcessWorker subclass for parallel analysis."""
+        self.process_workers.append(worker)
+        if hasattr(self, 'capture_worker'):
+            self.capture_worker.process_buffers.append(worker.raw_buffer)
 
     def store_tracking_data(self, timestamp, points):
         """
@@ -214,6 +240,8 @@ class VideoThread(QThread):
             self.filepath = filepath
             self.initialize_video_writer(self.filepath)
             self.recording_status = True
+            if hasattr(self, 'capture_worker'):
+                self.capture_worker.recording = True
             print(f"Video recording started: {self.filepath}")
         else:
             print("Video recording not started: No output file set or writer not initialized.")
@@ -223,6 +251,8 @@ class VideoThread(QThread):
         Stops the video recording and releases the video writer.
         """
         self.recording_status = False
+        if hasattr(self, 'capture_worker'):
+            self.capture_worker.recording = False
         print("Video recording stopped.")
             
     def initialize_video_writer(self, filepath):
@@ -235,33 +265,29 @@ class VideoThread(QThread):
         # Get video properties for saving
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        # Use a fixed FPS for recording, or try self.cap.get(cv2.CAP_PROP_FPS) if reliable
-        # If camera FPS is very low or variable, a fixed RECORDING_FPS is better.
-        #fps = RECORDING_FPS
-        # fps = self.cap.get(cv2.CAP_PROP_FPS)
-        # if fps <= 0:  # If FPS is not set or invalid, use a default value
-        #     fps = RECORDING_FPS
+        
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0:
+            self.fps = RECORDING_FPS
 
-        # Initialize VideoWriter
-        try:
-            self.out = cv2.VideoWriter(self.filepath, FOURCC_CODEC, self.fps,
-                                        (frame_width, frame_height))
-            if not self.out.isOpened():
-                raise IOError(f"Could not open video writer for {self.filepath}." +
-                                "Check codec or file path.")
-            print(f"Recording video to {self.filepath} at {self.fps} FPS, " +
-                    f"resolution {frame_width}x{frame_height}")
-        except Exception as e:
-            self.camera_error_signal.emit(f"Error initializing video writer: {e}")
-            self._run_flag = False
-            self.cap.release() # Release camera if writer fails
-            return
+        # Initialize FFMPEG VideoWriter
+        if hasattr(self, 'record_worker'):
+            try:
+                self.record_worker.initialize_writer(self.filepath, self.fps, (frame_width, frame_height))
+                print(f"Recording video to {self.filepath} at {self.fps} FPS, " +
+                      f"resolution {frame_width}x{frame_height} via FFMPEG")
+            except Exception as e:
+                self.camera_error_signal.emit(f"Error initializing video writer: {e}")
+                self._run_flag = False
+                return
         
     def run(self):
         """
-        Main loop for the thread. Captures video frames, processes them,
+        Main loop for the thread. Coordinates workers, drains result buffers,
         and emits signals for display.
         """
+        if not hasattr(self, 'capture_worker'):
+            return
 
         # Calculate proper frame interval based on desired FPS
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -271,193 +297,50 @@ class VideoThread(QThread):
             print('The FPS of the video file will not be accurate. Using default FPS:', self.fps)
         else:
             print('Camera reported FPS:', self.fps)
-        frame_interval = 1.0 / self.fps  # seconds between frames
-        last_timestamp = 0
 
+        # Start worker threads
+        self._capture_thread = threading.Thread(target=self.capture_worker.run, daemon=True)
+        self._process_threads = []
+        for worker in self.process_workers:
+            t = threading.Thread(target=worker.run, daemon=True)
+            self._process_threads.append(t)
+        self._record_thread = threading.Thread(target=self.record_worker.run, daemon=True)
+        
+        self._capture_thread.start()
+        for t in self._process_threads:
+            t.start()
+        self._record_thread.start()
+        
+        # Drain results from ALL process workers and emit Qt signals
         while self._run_flag:
-            ret, frame = self.cap.read()
-            timestamp = time.time() # A float in seconds.
-
-            if ret:
-                if self.recording_status:
-                    self.out.write(frame)
-
-                # Convert frame to grayscale for black detection
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
-                # Process video (tracking, detection, etc)
-                processed_frame, points, contour = self.process_frame(gray_frame)
-
-                # Store tracking data if recording
-                self.store_tracking_data(timestamp, points)
-
-                # Emit signal with the new frame (e.g., to show video in GUI)
-                self.frame_processed.emit(timestamp, processed_frame, points, contour)
-                #self.new_frame_signal.emit(gray_frame)
-            else:
-                # If frame reading fails, emit an error and stop
-                self.camera_error_signal.emit("Failed to read frame from camera. " +
-                                              "The camera might have been disconnected.")
-                self._run_flag = False
-
-            QThread.msleep(1)  # Small delay to reduce CPU usage
-
-        # Release the camera and video writer when the thread stops
+            got_result = False
+            for worker in self.process_workers:
+                result = worker.result_buffer.try_read_result()
+                if result is not None:
+                    timestamp, processed_frame, points, contour = result
+                    self.store_tracking_data(timestamp, points)
+                    self.frame_processed.emit(timestamp, processed_frame, points, contour)
+                    got_result = True
+            if not got_result:
+                QThread.msleep(1)
+        
+        # Shutdown workers
+        self.capture_worker.stop()
+        for worker in self.process_workers:
+            worker.stop()
+        self.record_worker.stop()
+        
+        if self._capture_thread.is_alive():
+            self._capture_thread.join(timeout=2.0)
+        for t in self._process_threads:
+            if t.is_alive():
+                t.join(timeout=2.0)
+        if self._record_thread.is_alive():
+            self._record_thread.join(timeout=2.0)
+        
         if self.cap:
             self.cap.release()
-        if self.out:
-            self.out.release()
         print("Video thread stopped and resources released.")
-
-    def apply_circular_mask(self, frame):
-        """
-        Apply circular masking to the frame by setting pixels outside the circular mask to white (255).
-
-        Args:
-            frame (np.ndarray): Grayscale frame to mask
-            
-        Returns:
-            np.ndarray: Masked frame
-        """
-        if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 3:
-            return frame
-            
-        # Create a copy of the frame to avoid modifying the original
-        masked_frame = frame.copy()
-        height, width = frame.shape
-        
-        # Get circle parameters
-        center_x, center_y, radius = self.mask_coords
-        
-        if radius <= 0:
-            print("Warning: Invalid circular mask radius, using full frame")
-            return frame
-            
-        # Create coordinate grids
-        y_coords, x_coords = np.ogrid[:height, :width]
-        
-        # Calculate distance from center for each pixel
-        distance_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-        
-        # Create mask: pixels outside the circle are set to white (255)
-        mask_outside_circle = distance_from_center > radius
-        masked_frame[mask_outside_circle] = 255
-        
-        return masked_frame
-
-    def apply_mask(self, frame):
-        """
-        Apply masking to the frame based on the current mask coordinates.
-        
-        Args:
-            frame (np.ndarray): Grayscale frame to mask
-            
-        Returns:
-            np.ndarray: Masked frame
-        """
-        if not self.mask_enabled or self.mask_coords is None:
-            return frame
-            
-        if len(self.mask_coords) == 3:
-            # Circular mask: [center_x, center_y, radius]
-            return self.apply_circular_mask(frame)
-        elif len(self.mask_coords) == 4:
-            # Rectangular mask: [x1, y1, x2, y2]
-            return self.apply_rectangular_mask(frame)
-        else:
-            print(f"Warning: Invalid mask coordinates length ({len(self.mask_coords)}), using full frame")
-            return frame
-
-    def apply_rectangular_mask(self, frame):
-        """
-        Apply rectangular masking to the frame by setting pixels outside the mask to white (255).
-
-        Args:
-            frame (np.ndarray): Grayscale frame to mask
-            
-        Returns:
-            np.ndarray: Masked frame
-        """
-        if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 4:
-            return frame
-            
-        # Create a copy of the frame to avoid modifying the original
-        masked_frame = frame.copy()
-        height, width = frame.shape
-        
-        # Get rectangle parameters
-        x1, y1, x2, y2 = self.mask_coords
-        
-        # Set default bounds if not specified and validate
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(width, x2) if x2 is not None else width
-        y2 = min(height, y2) if y2 is not None else height
-        
-        # Ensure coordinates are valid
-        if x1 >= x2 or y1 >= y2:
-            print("Warning: Invalid MASK coordinates, using full frame")
-            return frame
-            
-        # Create mask: 0 inside MASK, 255 outside MASK
-        mask = np.ones_like(frame) * 255
-        mask[y1:y2, x1:x2] = 0
-        
-        # Set pixels outside MASK to white (255)
-        masked_frame[mask == 255] = 255
-        
-        return masked_frame
-
-    def process_frame(self, frame):
-        """
-        Here is where you will perform tracking and detection of elements in video.
-        You want this function to be fast, so avoid heavy processing here.
-        
-        Returns:
-            tuple: (processed_frame, points, contour) where:
-                - processed_frame: The frame to display
-                - points: Tuple of tracked points (centroid,)
-                - contour: The largest contour found, None if no contours detected
-        """
-        if not self.tracking:
-            return (frame, (), None)
-        
-        # Apply MASK masking if enabled
-        masked_frame = self.apply_mask(frame)
-        
-        max_value = 255  # Assumes 8-bit grayscale images
-        inverted_frame = cv2.bitwise_not(masked_frame)
-        #inverted_frame = cv2.blur(inverted_frame, (5, 5))  # Optional: blur to reduce noise
-        ret, binary_frame = cv2.threshold(inverted_frame, max_value-self.threshold,
-                                          max_value, cv2.THRESH_BINARY) # + cv2.THRESH_OTSU)
-        contours, hierarchy = cv2.findContours(binary_frame, cv2.RETR_EXTERNAL,
-                                               cv2.CHAIN_APPROX_SIMPLE)
-        centroid = (-1,-1)  # Default centroid if no contours found
-        largest_area = 0
-        largest_contour = None
-
-        if contours:
-            for indc, cnt in enumerate(contours):
-                area = cv2.contourArea(cnt)
-                if area > largest_area:
-                    largest_area = area
-                    largest_contour = cnt
-            # Only compute centroid if contour meets minarea threshold
-            if largest_contour is not None and largest_area > self.minarea:
-                mom = cv2.moments(largest_contour)
-                if mom["m00"] != 0:
-                    cX = int(mom["m10"] / mom["m00"])
-                    cY = int(mom["m01"] / mom["m00"])
-                    centroid = (cX, cY)
-        points = (centroid,)  # A tuple of points of interest
-        if self.mode == 'grayscale':
-            # Return the original frame for display, but use masked frame for processing
-            processed_frame = frame
-        elif self.mode == 'binary':
-            processed_frame = cv2.bitwise_not(binary_frame)
-        if self.debug:
-            print(f"Centroid: {centroid} \t Largest area: {largest_area}")
-        return (processed_frame, points, largest_contour)
     
     def append_to_file(self, h5file):
         """
