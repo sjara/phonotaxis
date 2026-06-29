@@ -590,8 +590,8 @@ class Sound():
         nSamplesFall = round(self.srate * fallTime)
         riseVec = np.linspace(0, 1, nSamplesRise)
         fallVec = np.linspace(1, 0, nSamplesFall)
-        self.wave[:nSamplesRise] *= riseVec
-        self.wave[-nSamplesFall:] *= fallVec
+        self.wave[:nSamplesRise] *= riseVec[:, np.newaxis]
+        self.wave[-nSamplesFall:] *= fallVec[:, np.newaxis]
         return self.tvec, self.wave
 
     def suggest_filename(self, suffix=''):

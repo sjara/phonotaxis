@@ -22,6 +22,7 @@ dependencies = [
     "pandas",
     "h5py",
     "bidict",
+    "pyalsaaudio; sys_platform == 'linux'",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
