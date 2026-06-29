@@ -75,7 +75,7 @@ class ProcessWorker:
             if item is None:
                 continue
             timestamp, frame = item
-            processed_frame, points, contour = self.process_frame(frame)
+            processed_frame, points, contour, orientations = self.process_frame(frame)
             self.result_buffer.try_write_result(timestamp, processed_frame, points, contour)
 
     def apply_circular_mask(self, frame):
@@ -131,6 +131,7 @@ class ProcessWorker:
         contours, hierarchy = cv2.findContours(binary_frame, cv2.RETR_EXTERNAL,
                                                cv2.CHAIN_APPROX_SIMPLE)
         centroid = (-1,-1)
+        orientation = 0
         largest_area = 0
         largest_contour = None
 
@@ -146,7 +147,9 @@ class ProcessWorker:
                     cX = int(mom["m10"] / mom["m00"])
                     cY = int(mom["m01"] / mom["m00"])
                     centroid = (cX, cY)
+                    orientation = np.arctan2(2*mom['m11'], mom['m20'] - mom['m02'])/2
         points = (centroid,)
+        orientations = (orientation,)
         if self.mode == 'grayscale':
             processed_frame = frame
         elif self.mode == 'binary':
@@ -154,11 +157,25 @@ class ProcessWorker:
         else:
             processed_frame = frame
             
-        return (processed_frame, points, largest_contour)
+        return (processed_frame, points, largest_contour, orientations)
 
     def stop(self):
         self.running = False
 
+class KinematicsWorker:
+    """Reads from results buffer and calculates kinematics"""
+    def __init__(self, result_buffer: ResultBuffer,
+                 threshold: int, minarea: int, tracking: bool = True):
+        self.result_buffer = result_buffer
+        
+        self.threshold: int = threshold
+        self.minarea: int = minarea
+        self.tracking: bool = tracking
+        self.mask_enabled: bool = False
+        self.mask_coords: Optional[list] = None
+        self.mode: str = 'grayscale'
+        
+        self.running: bool = True
 
 class RecordWorker:
     """Reads from record_buffer, writes frames via FFMPEG subprocess (GPU-accelerated)."""
