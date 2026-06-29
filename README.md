@@ -10,7 +10,7 @@ A framework for developing behavioral tasks that use video tracking and sound pl
         * `conda activate phonotaxis`
         * The prompt should now say `(phonotaxis)`, indicating you are in the environment.
     * **Linux (Ubuntu):** using `virtualenvwrapper`.
-        * Install system dependencies: `sudo apt install virtualenvwrapper libasound2-dev`
+        * Install system dependencies: `sudo apt install virtualenvwrapper libasound2-dev portaudio19-dev`
         * Add the following to your `~/.bashrc` (if not already there):
           ```bash
           export WORKON_HOME=$HOME/.virtualenvs
@@ -23,7 +23,7 @@ A framework for developing behavioral tasks that use video tracking and sound pl
           `pip install -e .`
         * Next time, just run `workon phonotaxis` to activate it again.
     * **Linux (Ubuntu), alternative:** using [uv](https://github.com/astral-sh/uv).
-        * Install system dependencies: `sudo apt install pipx libasound2-dev`
+        * Install system dependencies: `sudo apt install pipx libasound2-dev portaudio19-dev`
         * Install uv (without running a shell script from the web):
           `pipx install uv`
         * From the `phonotaxis` folder: `uv venv` then `source .venv/bin/activate`.
