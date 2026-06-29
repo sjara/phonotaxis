@@ -4,6 +4,7 @@ Create and present sounds.
 
 import sys
 import os
+import threading
 import sounddevice as sd
 import random
 import numpy as np
@@ -255,6 +256,166 @@ class SoundPlayer():
         self.sounds.clear()
 
     
+def create_player():
+    """
+    Instantiate and return the appropriate sound player based on config.SOUND_BACKEND.
+
+    Returns an AlsaPlayer if SOUND_BACKEND is 'alsa', otherwise a SoundPlayer.
+    Config keys used: SOUND_BACKEND, SOUND_DEVICE, ALSA_DEVICE, ALSA_SAMPLERATE,
+    ALSA_PERIOD_SIZE.
+    """
+    try:
+        from phonotaxis import config
+    except ImportError:
+        config = None
+
+    backend = getattr(config, 'SOUND_BACKEND', 'portaudio')
+
+    if backend == 'alsa':
+        device = getattr(config, 'ALSA_DEVICE', 'hw:1,0')
+        samplerate = getattr(config, 'ALSA_SAMPLERATE', 384000)
+        period_size = getattr(config, 'ALSA_PERIOD_SIZE', 1024)
+        return AlsaPlayer(device=device, samplerate=samplerate, period_size=period_size)
+    else:
+        player = SoundPlayer()
+        device = getattr(config, 'SOUND_DEVICE', None)
+        if device is not None:
+            player.device = device
+        return player
+
+
+class AlsaPlayer():
+    """
+    Low-latency sound player for Linux using direct ALSA hardware access.
+
+    Bypasses PulseAudio/PipeWire and the PortAudio layer to write directly to
+    an ALSA hw device, enabling 192/384 kHz operation and minimal latency.
+    Shares the same public interface as SoundPlayer so paradigm scripts can
+    swap backends via config.SOUND_BACKEND without any other changes.
+
+    Requires the 'pyalsaaudio' package (Linux only).
+
+    Args:
+        device (str): ALSA hw device string, e.g. 'hw:1,0'.
+        samplerate (int): Sampling rate in Hz (e.g. 384000).
+        period_size (int): Frames per ALSA period; smaller = lower latency.
+        nchannels (int): Number of output channels.
+
+    Example:
+        >>> player = AlsaPlayer(device='hw:1,0', samplerate=384000)
+        >>> player.set_sound(1, sound)
+        >>> player.play(1)
+        >>> state_machine.integerOutput.connect(player.play)
+    """
+
+    FORMAT = None  # set in __init__ after importing alsaaudio
+
+    def __init__(self, device='hw:1,0', samplerate=384000, period_size=1024, nchannels=2):
+        try:
+            import alsaaudio
+        except ImportError:
+            raise ImportError("pyalsaaudio is required for AlsaPlayer. "
+                              "Install it with: pip install pyalsaaudio")
+        self._alsaaudio = alsaaudio
+        self.device = device
+        self.samplerate = samplerate
+        self.period_size = period_size
+        self.nchannels = nchannels
+        self.sounds = {}
+        self._lock = threading.Lock()
+        self._playback_thread = None
+        self._stop_event = threading.Event()
+
+    def _open_pcm(self):
+        """Open and configure the ALSA PCM device for playback."""
+        pcm = self._alsaaudio.PCM(
+            self._alsaaudio.PCM_PLAYBACK,
+            device=self.device,
+        )
+        pcm.setchannels(self.nchannels)
+        pcm.setrate(self.samplerate)
+        pcm.setformat(self._alsaaudio.PCM_FORMAT_S32_LE)
+        pcm.setperiodsize(self.period_size)
+        return pcm
+
+    def set_sound(self, sound_id, sound):
+        """Store a Sound object under an integer ID."""
+        self.sounds[sound_id] = sound
+
+    def play(self, sound_id):
+        """
+        Play a sound by its integer ID (non-blocking).
+
+        Integer ID convention (same as SoundPlayer):
+            0:          No action
+            Positive:   Play that sound
+            -1:         Stop all sounds
+        """
+        if sound_id == 0:
+            return
+        if sound_id == -1:
+            self.stop()
+            return
+        if sound_id > 0:
+            if sound_id not in self.sounds:
+                print(f"Warning: Sound ID {sound_id} not found")
+                return
+            sound = self.sounds[sound_id]
+            # Convert float64 [-1, 1] waveform to signed 32-bit PCM.
+            wave_int32 = (sound.wave * 2147483647).astype(np.int32)
+            # ALSA expects interleaved bytes.
+            raw = wave_int32.tobytes()
+            self._stop_event.clear()
+            with self._lock:
+                self._playback_thread = threading.Thread(
+                    target=self._write_pcm,
+                    args=(raw,),
+                    daemon=True,
+                )
+                self._playback_thread.start()
+        else:
+            print(f"Warning: Unrecognized control signal {sound_id} (reserved for future use)")
+
+    def _write_pcm(self, raw):
+        """Write raw PCM bytes to the ALSA device in period-sized chunks."""
+        bytes_per_period = self.period_size * self.nchannels * 4  # 4 bytes per S32_LE sample
+        pcm = self._open_pcm()
+        offset = 0
+        try:
+            while offset < len(raw) and not self._stop_event.is_set():
+                chunk = raw[offset:offset + bytes_per_period]
+                if len(chunk) < bytes_per_period:
+                    chunk = chunk + b'\x00' * (bytes_per_period - len(chunk))
+                pcm.write(chunk)
+                offset += bytes_per_period
+        finally:
+            pcm.close()
+
+    def stop(self):
+        """Stop any currently playing sound."""
+        self._stop_event.set()
+        with self._lock:
+            if self._playback_thread is not None:
+                self._playback_thread.join(timeout=0.5)
+                self._playback_thread = None
+
+    def wait_until_done(self):
+        """Block until the current sound finishes playing."""
+        with self._lock:
+            t = self._playback_thread
+        if t is not None:
+            t.join()
+
+    def connect_state_machine(self, state_machine):
+        """Connect to a state machine's integerOutput signal."""
+        state_machine.integerOutput.connect(self.play)
+
+    def close(self):
+        """Stop playback and release all resources."""
+        self.stop()
+        self.sounds.clear()
+
+
 class Sound():
     """
     Sound waveform generator.

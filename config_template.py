@@ -27,5 +27,13 @@ OUTPUT_PINS = {
 # python -c "import sounddevice as sd; print(sd.query_devices())"
 SOUND_DEVICE = 15  # 32: Xonar 5.1 surround sound card
 
+# Sound backend: 'portaudio' (cross-platform, uses sounddevice) or
+#                'alsa' (Linux only, low-latency direct ALSA hw access)
+# For ALSA, also set ALSA_DEVICE, ALSA_SAMPLERATE, and ALSA_PERIOD_SIZE.
+SOUND_BACKEND = 'portaudio'
+ALSA_DEVICE = 'hw:1,0'
+ALSA_SAMPLERATE = 384000
+ALSA_PERIOD_SIZE = 1024  # frames per period (controls latency)
+
 VIDEO_PATH = '/var/tmp/videophonotaxis/'
 DATA_PATH = '/var/tmp/dataphonotaxis/'
