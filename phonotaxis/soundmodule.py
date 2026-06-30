@@ -336,14 +336,15 @@ class AlsaPlayer():
         pcm = self._alsaaudio.PCM(
             self._alsaaudio.PCM_PLAYBACK,
             device=self.device,
+            channels=self.nchannels,
+            rate=self.samplerate,
+            format=self._alsaaudio.PCM_FORMAT_S32_LE,
+            periodsize=self.period_size,
         )
-        pcm.setchannels(self.nchannels)
-        actual_rate = pcm.setrate(self.samplerate)
+        actual_rate = pcm.info()['rate']
         if actual_rate != self.samplerate:
             print(f"Warning: requested sample rate {self.samplerate} Hz but "
                   f"ALSA is using {actual_rate} Hz. Sound duration will be wrong.")
-        pcm.setformat(self._alsaaudio.PCM_FORMAT_S32_LE)
-        pcm.setperiodsize(self.period_size)
         return pcm
 
     def set_sound(self, sound_id, sound):
