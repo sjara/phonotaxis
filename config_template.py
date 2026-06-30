@@ -30,9 +30,9 @@ SOUND_DEVICE = 15  # 32: Xonar 5.1 surround sound card
 # Sound backend: 'portaudio' (cross-platform, uses sounddevice) or
 #                'alsa' (Linux only, low-latency direct ALSA hw access)
 # For ALSA, also set ALSA_DEVICE, ALSA_SAMPLERATE, and ALSA_PERIOD_SIZE.
-SOUND_BACKEND = 'portaudio'
-ALSA_DEVICE = 'hw:0,0'
-ALSA_SAMPLERATE = 441000
+SOUND_BACKEND = 'alsa'
+ALSA_DEVICE = 'hw:1,0'  # Find your device with `aplay -l`
+ALSA_SAMPLERATE = 384000  # Find possible sampling rates with `aplay -D hw:1,0 --dump-hw-params /dev/zero`
 ALSA_PERIOD_SIZE = 1024  # frames per period (controls latency)
 
 VIDEO_PATH = '/var/tmp/videophonotaxis/'
