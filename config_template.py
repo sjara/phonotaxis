@@ -31,7 +31,7 @@ SOUND_DEVICE = 15  # 32: Xonar 5.1 surround sound card
 #                'alsa' (Linux only, low-latency direct ALSA hw access)
 # For ALSA, also set ALSA_DEVICE, ALSA_SAMPLERATE, and ALSA_PERIOD_SIZE.
 SOUND_BACKEND = 'alsa'
-ALSA_DEVICE = 'hw:1,0'  # Find your device with `aplay -l`
+ALSA_DEVICE = 'hw:D10s,0'  # Use card name (e.g. hw:D10s,0) or index (e.g. hw:1,0). Find with `aplay -l`
 ALSA_SAMPLERATE = 384000  # Find possible sampling rates with `aplay -D hw:1,0 --dump-hw-params /dev/zero`
 ALSA_PERIOD_SIZE = 1024  # frames per period (controls latency)
 
