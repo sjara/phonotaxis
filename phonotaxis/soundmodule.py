@@ -5,7 +5,6 @@ Create and present sounds.
 import sys
 import os
 import threading
-import sounddevice as sd
 import random
 import numpy as np
 import scipy.io.wavfile
@@ -23,6 +22,7 @@ FALLTIME = 0.002
 randomGen = np.random.default_rng()
 
 def list_devices():
+    import sounddevice as sd
     return sd.query_devices()
 
 def find_5_1_device():
@@ -64,6 +64,11 @@ class SoundPlayer():
         >>> state_machine.integerOutput.connect(player.play)
     """
     def __init__(self):
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            raise ImportError(f"sounddevice could not be initialized (is PortAudio available?): {e}")
+        self._sd = sd
         self.device = sd.default.device[1]  # Use default device
         self.sounds = {}  # Maps integer IDs to Sound objects
         self.active_streams = {}  # Maps sound_id to active OutputStream objects
@@ -104,7 +109,7 @@ class SoundPlayer():
         if sound_id > 0:
             if sound_id in self.sounds:
                 sound = self.sounds[sound_id]
-                sd.play(sound.wave, sound.srate, device=self.device)
+                self._sd.play(sound.wave, sound.srate, device=self.device)
             else:
                 print(f"Warning: Sound ID {sound_id} not found")
         else:
@@ -156,12 +161,12 @@ class SoundPlayer():
                     
                     if chunksize < frames:
                         outdata[chunksize:] = 0  # Fill remaining with silence
-                        raise sd.CallbackStop()  # Stop the stream when done
+                        raise self._sd.CallbackStop()  # Stop the stream when done
                     
                     position[0] += chunksize
                 
                 # Create an OutputStream with callback for non-blocking playback
-                stream = sd.OutputStream(
+                stream = self._sd.OutputStream(
                     samplerate=sound.srate,
                     channels=sound.nchannels,
                     device=self.device,
@@ -197,7 +202,7 @@ class SoundPlayer():
         Note: Since sd.play() doesn't provide individual sound control, this stops ALL
         sounds started with play().
         """
-        sd.stop()
+        self._sd.stop()
 
     def stop_stream(self, sound_id=None):
         """
@@ -225,7 +230,7 @@ class SoundPlayer():
 
     def wait_until_done(self):
         """Wait until the current sound is done playing."""
-        sd.wait()
+        self._sd.wait()
 
     def connect_state_machine(self, state_machine):
         """
