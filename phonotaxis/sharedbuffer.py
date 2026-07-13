@@ -1,6 +1,7 @@
 import threading
 import numpy as np
 from typing import Optional, Tuple
+from .resultbus import WorkerResult
 
 class SharedFrameBuffer:
     """
@@ -63,17 +64,20 @@ class SharedFrameBuffer:
 
 class ResultBuffer:
     """
-    Lock-protected buffer for a ProcessWorker to pass results back to the coordinator.
+    Lock-protected buffer for a ProcessWorker to pass results back
+    to the coordinator.  Stores ``WorkerResult`` objects.
     """
     def __init__(self):
         self._lock = threading.Lock()
-        self._result = None
+        self._result: Optional[WorkerResult] = None
         
-    def try_write_result(self, timestamp, processed_frame, points, contour):
+    def try_write_result(self, result: WorkerResult):
+        """Write a ``WorkerResult`` into the buffer (overwrites previous)."""
         with self._lock:
-            self._result = (timestamp, processed_frame, points, contour)
+            self._result = result
             
-    def try_read_result(self):
+    def try_read_result(self) -> Optional[WorkerResult]:
+        """Non-blocking read.  Returns ``None`` if buffer is empty."""
         with self._lock:
             res = self._result
             self._result = None

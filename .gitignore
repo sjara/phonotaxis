@@ -6,6 +6,10 @@ __pycache__/
 # Old code
 old/*
 
+# Implementation plans (for coding agents)
+implementation_plans/
+artifacts/
+
 # Emacs temp files
 *~
 

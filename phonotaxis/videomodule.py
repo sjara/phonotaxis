@@ -12,7 +12,8 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QObject
 import threading
 from .sharedbuffer import SharedFrameBuffer, ResultBuffer
-from .videoworkers import CaptureWorker, ProcessWorker, RecordWorker
+from .videoworkers import CaptureWorker, ProcessWorker, RecordWorker, ContourTracker, FileCaptureWorker
+from .resultbus import ResultBus, WorkerResult
 
 # --- Configuration ---
 #FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
@@ -35,17 +36,22 @@ class VideoThread(QThread):
     camera_error_signal = pyqtSignal(str)
     frame_processed = pyqtSignal(float, np.ndarray, tuple, object) # Emits timestamp, frame, points, and contour
 
-    def __init__(self, camera_index=0, mode='grayscale', tracking=False, debug=False):
+    def __init__(self, camera_index=0, mode='grayscale', tracking=False, debug=False, fps_limit=None, loop=False, start_paused=False):
         """
         Args:
-            camera_index (int): Index of the camera to use.
+            camera_index (int or str): Index of the camera or path to a video file.
             mode (str): Type of image emitted: ['grayscale', 'binary']
                         Note that this does not affect the saved video.
             tracking (bool): Whether to track the largest dark object in the video.
             debug (bool): If True, prints debug information to console.
+            fps_limit (float, optional): Maximum frame rate for file playback.
+            loop (bool): Whether to loop video file playback.
+            start_paused (bool): Whether to start paused (for file playback).
         """
         super().__init__()
         self.camera_index = camera_index
+        self.fps_limit = fps_limit
+        self.loop = loop
         self._run_flag = True
         self.cap = None
         self.out = None # Initialize video writer to None
@@ -56,6 +62,7 @@ class VideoThread(QThread):
         self.filepath = None  # Path to save the video output, if any
         self.threshold = DEFAULT_BLACK_THRESHOLD  # Default threshold for detecting dark objects
         self.minarea = DEFAULT_MINIMUM_AREA  # Default minimum area of object to track
+        self._paused = start_paused  # Start paused state
 
         # Store tracking
         self.timestamps = []
@@ -75,16 +82,38 @@ class VideoThread(QThread):
             self.result_buffer = ResultBuffer()
             self.record_buffer = SharedFrameBuffer(capacity=30, frame_shape=frame_shape, dtype=np.uint8)
             
+            # Create inter-worker communication bus
+            self.result_bus = ResultBus()
+            
             self.process_workers = []
             
-            # Setup primary worker
-            primary_worker = ProcessWorker(self.raw_buffer, self.result_buffer, 
-                                           self.threshold, self.minarea, tracking=self.tracking)
-            primary_worker.mode = self._mode
+            # Setup contour-tracking strategy and primary worker
+            self.contour_tracker = ContourTracker(
+                self.threshold, self.minarea, tracking=self.tracking
+            )
+            self.contour_tracker.mode = self._mode
+            
+            primary_worker = ProcessWorker(
+                strategy=self.contour_tracker,
+                result_buffer=self.result_buffer,
+                name='contour_tracker',
+                raw_buffer=self.raw_buffer,
+                publish_to_bus=self.result_bus,
+            )
             self.process_workers.append(primary_worker)
             
             # Setup capture and record workers
-            self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_buffer)
+            if isinstance(self.camera_index, str):
+                self.capture_worker = FileCaptureWorker(
+                    cap=self.cap,
+                    process_buffers=[self.raw_buffer],
+                    record_buffer=self.record_buffer,
+                    fps_limit=self.fps_limit,
+                    loop=self.loop,
+                    paused=self._paused
+                )
+            else:
+                self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_buffer)
             self.record_worker = RecordWorker(self.record_buffer)
         
         # We will keep track of threads here
@@ -94,31 +123,43 @@ class VideoThread(QThread):
 
     @property
     def mask_coords(self):
-        if hasattr(self, 'process_workers') and self.process_workers:
-            return self.process_workers[0].mask_coords
+        if hasattr(self, 'contour_tracker'):
+            return self.contour_tracker.mask_coords
         return None
 
     @property
+    def paused(self) -> bool:
+        if hasattr(self, 'capture_worker'):
+            return getattr(self.capture_worker, 'paused', False)
+        return self._paused
+
+    @paused.setter
+    def paused(self, value: bool):
+        self._paused = value
+        if hasattr(self, 'capture_worker'):
+            self.capture_worker.paused = value
+
+    @property
     def mask_enabled(self):
-        if hasattr(self, 'process_workers') and self.process_workers:
-            return self.process_workers[0].mask_enabled
+        if hasattr(self, 'contour_tracker'):
+            return self.contour_tracker.mask_enabled
         return False
 
     def set_threshold(self, threshold):
         self.threshold = threshold
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].threshold = threshold
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.threshold = threshold
         
     def set_minarea(self, minarea):
         self.minarea = minarea
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].minarea = minarea
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.minarea = minarea
 
     def set_circular_mask(self, coords):
         if len(coords) != 3:
             raise ValueError("Circular mask requires exactly 3 coordinates: [center_x, center_y, radius]")
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].set_circular_mask(coords)
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.set_circular_mask(coords)
         if self.debug:
             center_x, center_y, radius = coords
             print(f"Circular MASK set: center ({center_x}, {center_y}), radius {radius}")
@@ -126,8 +167,8 @@ class VideoThread(QThread):
     def set_rectangular_mask(self, coords):
         if len(coords) != 4:
             raise ValueError("Rectangular mask requires exactly 4 coordinates: [x1, y1, x2, y2]")
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].set_rectangular_mask(coords)
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.set_rectangular_mask(coords)
         if self.debug:
             x1, y1, x2, y2 = coords
             print(f"Rectangular MASK set: ({x1}, {y1}) to ({x2}, {y2})")
@@ -142,46 +183,46 @@ class VideoThread(QThread):
         self.set_rectangular_mask([x1, y1, x2, y2])
 
     def disable_mask(self):
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].disable_mask()
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.disable_mask()
         if self.debug:
             print("MASK masking disabled")
 
     def get_mask(self):
-        if not hasattr(self, 'process_workers') or not self.process_workers:
+        if not hasattr(self, 'contour_tracker'):
             return None
-        pw = self.process_workers[0]
-        if not pw.mask_enabled or pw.mask_coords is None:
+        ct = self.contour_tracker
+        if not ct.mask_enabled or ct.mask_coords is None:
             return None
         
-        if len(pw.mask_coords) == 3:
-            center_x, center_y, radius = pw.mask_coords
+        if len(ct.mask_coords) == 3:
+            center_x, center_y, radius = ct.mask_coords
             return {
                 'type': 'circular',
-                'coords': pw.mask_coords,
+                'coords': ct.mask_coords,
                 'center_x': center_x,
                 'center_y': center_y,
                 'radius': radius,
-                'enabled': pw.mask_enabled
+                'enabled': ct.mask_enabled
             }
-        elif len(pw.mask_coords) == 4:
-            x1, y1, x2, y2 = pw.mask_coords
+        elif len(ct.mask_coords) == 4:
+            x1, y1, x2, y2 = ct.mask_coords
             return {
                 'type': 'rectangular',
-                'coords': pw.mask_coords,
+                'coords': ct.mask_coords,
                 'x1': x1,
                 'y1': y1,
                 'x2': x2,
                 'y2': y2,
-                'enabled': pw.mask_enabled
+                'enabled': ct.mask_enabled
             }
         else:
             return None
 
     @property
     def mode(self):
-        if hasattr(self, 'process_workers') and self.process_workers:
-            return self.process_workers[0].mode
+        if hasattr(self, 'contour_tracker'):
+            return self.contour_tracker.mode
         return self._mode
         
     @mode.setter
@@ -189,16 +230,22 @@ class VideoThread(QThread):
         if mode_val not in ['grayscale', 'binary']:
             raise ValueError("Mode must be 'grayscale' or 'binary'.")
         self._mode = mode_val
-        if hasattr(self, 'process_workers') and self.process_workers:
-            self.process_workers[0].mode = mode_val
+        if hasattr(self, 'contour_tracker'):
+            self.contour_tracker.mode = mode_val
 
     def set_mode(self, mode_val):
         self.mode = mode_val
             
     def add_process_worker(self, worker):
-        """Registers an additional ProcessWorker subclass for parallel analysis."""
+        """Register an additional ProcessWorker for parallel analysis.
+
+        The worker can operate in frame mode (with its own raw_buffer) or
+        bus mode (subscribing to another worker's results via the
+        ResultBus).  If the worker has a ``raw_buffer``, the capture
+        worker is updated to fan out frames to it.
+        """
         self.process_workers.append(worker)
-        if hasattr(self, 'capture_worker'):
+        if hasattr(self, 'capture_worker') and worker.raw_buffer is not None:
             self.capture_worker.process_buffers.append(worker.raw_buffer)
 
     def store_tracking_data(self, timestamp, points):
@@ -226,9 +273,12 @@ class VideoThread(QThread):
     def initialize_camera(self):
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
-            self.camera_error_signal.emit(f"Could not open camera at index {self.camera_index}. " +
-                                          "Please check if the camera is connected and not " +
-                                          "in use by another application.")
+            if isinstance(self.camera_index, str):
+                self.camera_error_signal.emit(f"Could not open video file: {self.camera_index}")
+            else:
+                self.camera_error_signal.emit(f"Could not open camera at index {self.camera_index}. " +
+                                              "Please check if the camera is connected and not " +
+                                              "in use by another application.")
             self._run_flag = False
             return
 
@@ -317,10 +367,26 @@ class VideoThread(QThread):
             for worker in self.process_workers:
                 result = worker.result_buffer.try_read_result()
                 if result is not None:
-                    timestamp, processed_frame, points, contour = result
-                    self.store_tracking_data(timestamp, points)
-                    self.frame_processed.emit(timestamp, processed_frame, points, contour)
+                    data = result.data
+                    processed_frame = data.get('processed_frame')
+                    points = data.get('points')
+                    if processed_frame is not None and isinstance(points, (tuple, list)):
+                        timestamp = result.timestamp
+                        contour = data.get('contour')
+                        self.store_tracking_data(timestamp, points)
+                        self.frame_processed.emit(timestamp, processed_frame, points, contour)
                     got_result = True
+            
+            # Check if file playback is finished and buffers are drained
+            if isinstance(self.capture_worker, FileCaptureWorker) and not self._capture_thread.is_alive():
+                raw_empty = (self.raw_buffer._items_available == 0)
+                queues_empty = all(w._subscription_queue is None or w._subscription_queue.empty() for w in self.process_workers)
+                workers_idle = all(not w.is_processing for w in self.process_workers)
+                results_empty = all(w.result_buffer._result is None for w in self.process_workers)
+                if raw_empty and queues_empty and workers_idle and results_empty:
+                    self._run_flag = False
+                    break
+
             if not got_result:
                 QThread.msleep(1)
         
