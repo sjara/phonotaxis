@@ -7,7 +7,7 @@ import tempfile
 import os
 import threading
 from phonotaxis.sharedbuffer import SharedFrameBuffer, ResultBuffer
-from phonotaxis.videoworkers import ProcessWorker, ContourTracker, FileCaptureWorker
+from phonotaxis.videoworkers import ProcessWorker, ContourTracker, FileCaptureWorker, RecordWorker
 from phonotaxis.videomodule import VideoThread
 from phonotaxis.resultbus import WorkerResult, ResultBus
 
@@ -379,3 +379,95 @@ def test_video_thread_file_integration():
         assert len(vt.points) > 0
         # The moving spot was tracked, coordinates shouldn't be (-1, -1)
         assert vt.points[0][0] != (-1, -1)
+
+
+def test_file_capture_worker_captured_count():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, "test.avi")
+        create_dummy_video(video_path, fps=100, num_frames=10)
+        
+        cap = cv2.VideoCapture(video_path)
+        raw_buffer = SharedFrameBuffer(capacity=20, frame_shape=(100, 100))
+        
+        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=100, loop=False)
+        assert worker.captured_count == 0
+        
+        t = threading.Thread(target=worker.run, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+        
+        assert worker.captured_count == 10
+
+
+def test_file_capture_worker_wait_on_full_disabled():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, "test.avi")
+        create_dummy_video(video_path, fps=1000, num_frames=15)
+        
+        cap = cv2.VideoCapture(video_path)
+        raw_buffer = SharedFrameBuffer(capacity=5, frame_shape=(100, 100))
+        
+        # Test with wait_on_full=False
+        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=1000, loop=False, wait_on_full=False)
+        assert worker.wait_on_full is False
+        
+        t = threading.Thread(target=worker.run, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+        
+        # It should read all 15 frames without waiting
+        assert worker.captured_count == 15
+        
+        # Buffer only holds at most 5 items because it overwrites rather than waiting
+        count = 0
+        while raw_buffer.try_read() is not None:
+            count += 1
+        assert count == 5
+
+
+def test_worker_performance_counters():
+    """Verify that processed_count on ProcessWorker and recorded_count on RecordWorker increment correctly."""
+    buf = SharedFrameBuffer(5, (10, 10))
+    res_buf = ResultBuffer()
+    
+    worker = ProcessWorker(
+        strategy=lambda ts, f: {'val': 1},
+        result_buffer=res_buf,
+        name='test_worker',
+        raw_buffer=buf,
+    )
+    assert worker.processed_count == 0
+    
+    # Write frames and run worker
+    buf.try_write(1.0, np.zeros((10, 10), dtype=np.uint8))
+    buf.try_write(2.0, np.zeros((10, 10), dtype=np.uint8))
+    
+    t = threading.Thread(target=worker.run, daemon=True)
+    t.start()
+    time.sleep(0.1)
+    worker.stop()
+    t.join(timeout=2.0)
+    
+    assert worker.processed_count == 2
+    
+    # Test RecordWorker
+    rec_worker = RecordWorker()
+    assert rec_worker.recorded_count == 0
+    
+    # mock _ffmpeg_process
+    class MockFFmpeg:
+        def __init__(self):
+            class MockStdin:
+                def write(self, data):
+                    pass
+                def close(self):
+                    pass
+            self.stdin = MockStdin()
+        def wait(self):
+            pass
+    rec_worker._ffmpeg_process = MockFFmpeg()
+    
+    rec_worker.write_frame(1.0, np.zeros((10, 10), dtype=np.uint8))
+    
+    assert rec_worker.recorded_count == 1
+

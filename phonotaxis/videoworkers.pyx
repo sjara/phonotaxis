@@ -12,12 +12,13 @@ cdef class CaptureWorker:
     """Reads frames from cv2.VideoCapture, fans out to multiple buffers."""
     def __init__(self, object cap,
                  list process_buffers,
-                 SharedFrameBuffer record_buffer):
+                 RecordWorker record_worker = None):
         self.cap = cap
         self.process_buffers = process_buffers
-        self.record_buffer = record_buffer
+        self.record_worker = record_worker
         self.running = True
         self.recording = False
+        self.captured_count = 0
 
     def _ensure_grayscale(self, cnp.ndarray frame):
         if frame.ndim == 3:
@@ -35,13 +36,14 @@ cdef class CaptureWorker:
             ret, frame = self.cap.read()
             timestamp = time.time()
             if ret:
+                self.captured_count += 1
                 gray = self._ensure_grayscale(frame)
                 
                 for buf in self.process_buffers:
                     buf.try_write(timestamp, gray)
                 
-                if self.recording and self.record_buffer is not None:
-                    self.record_buffer.try_write(timestamp, gray)
+                if self.recording and self.record_worker is not None:
+                    self.record_worker.write_frame(timestamp, gray)
             else:
                 # To prevent tight loop on failure, sleep briefly
                 time.sleep(0.001)
@@ -54,18 +56,21 @@ cdef class FileCaptureWorker:
     """Reads frames from a video file cv2.VideoCapture, fans out to multiple buffers at a controlled rate."""
     def __init__(self, object cap,
                  list process_buffers,
-                 SharedFrameBuffer record_buffer = None,
+                 RecordWorker record_worker = None,
                  object fps_limit = None,
                  bint loop = False,
-                 bint paused = False):
+                 bint paused = False,
+                 bint wait_on_full = True):
         self.cap = cap
         self.process_buffers = process_buffers
-        self.record_buffer = record_buffer
+        self.record_worker = record_worker
         self.fps_limit = fps_limit
         self.loop = loop
         self.running = True
         self.recording = False
         self.paused = paused
+        self.wait_on_full = wait_on_full
+        self.captured_count = 0
         
         # Get properties
         self.file_fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -111,16 +116,17 @@ cdef class FileCaptureWorker:
                     time.sleep(sleep_dur)
             
             # Wait if any process buffer is full to prevent frame drops
-            while self.running:
-                any_full = False
-                for buf in self.process_buffers:
-                    if buf._items_available >= buf._capacity:
-                        any_full = True
+            if self.wait_on_full:
+                while self.running:
+                    any_full = False
+                    for buf in self.process_buffers:
+                        if buf._items_available >= buf._capacity:
+                            any_full = True
+                            break
+                    if any_full:
+                        time.sleep(0.001)
+                    else:
                         break
-                if any_full:
-                    time.sleep(0.001)
-                else:
-                    break
 
             if not self.running:
                 break
@@ -137,14 +143,15 @@ cdef class FileCaptureWorker:
                 else:
                     break  # End of file
                     
+            self.captured_count += 1
             timestamp = time.time()
             gray = self._ensure_grayscale(frame)
             
             for buf in self.process_buffers:
                 buf.try_write(timestamp, gray)
                 
-            if self.recording and self.record_buffer is not None:
-                self.record_buffer.try_write(timestamp, gray)
+            if self.recording and self.record_worker is not None:
+                self.record_worker.write_frame(timestamp, gray)
                 
     def stop(self):
         self.running = False
@@ -349,6 +356,7 @@ cdef class ProcessWorker:
         self.raw_buffer = raw_buffer
         self.running = True
         self.is_processing = False
+        self.processed_count = 0
 
         # Bus subscription setup
         self._subscription_queue = None
@@ -404,6 +412,7 @@ cdef class ProcessWorker:
                 continue
 
             if result_data is not None:
+                self.processed_count += 1
                 result = WorkerResult(
                     timestamp=timestamp,
                     data=result_data,
@@ -422,11 +431,11 @@ cdef class ProcessWorker:
 
 cdef class RecordWorker:
     """Reads from record_buffer, writes frames via FFMPEG subprocess (GPU-accelerated)."""
-    def __init__(self, SharedFrameBuffer record_buffer):
-        self.record_buffer = record_buffer
+    def __init__(self, record_buffer=None):
         self.running = True
         self._ffmpeg_process = None
         self._frame_size = None
+        self.recorded_count = 0
 
     def initialize_writer(self, str filepath, double fps, tuple frame_size, str encoder='h264_nvenc'):
         self._frame_size = frame_size
@@ -442,8 +451,10 @@ cdef class RecordWorker:
             '-s', f'{width}x{height}',
             '-pix_fmt', 'gray', # Mono camera
             '-r', str(fps),
+            '-thread_queue_size', '2048', # Queue up to 2048 raw frames in ffmpeg internal buffer
             '-i', '-', # Read from stdin
             '-c:v', encoder,
+            '-bufsize', '6M', # Set rate control VBV buffer size
             '-pix_fmt', 'yuv420p', # For compatibility
             filepath
         ]
@@ -467,22 +478,18 @@ cdef class RecordWorker:
             self._ffmpeg_process.wait()
             self._ffmpeg_process = None
 
+    cpdef write_frame(self, double timestamp, cnp.ndarray[cnp.uint8_t, ndim=2] frame):
+        if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
+            try:
+                self._ffmpeg_process.stdin.write(frame.tobytes())
+                self.recorded_count += 1
+            except Exception as e:
+                print(f"Error writing to ffmpeg: {e}")
+                pass
+
     def run(self):
-        cdef object item
-        cdef double timestamp
-        cdef cnp.ndarray frame
         while self.running:
-            item = self.record_buffer.read_blocking(timeout=0.05)
-            if item is None:
-                continue
-            timestamp, frame = item
-            if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
-                try:
-                    self._ffmpeg_process.stdin.write(frame.tobytes())
-                except Exception as e:
-                    print(f"Error writing to ffmpeg: {e}")
-                    # stop recording if writing fails?
-                    pass
+            time.sleep(0.01)
 
     def stop(self):
         self.running = False

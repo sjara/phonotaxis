@@ -35,9 +35,13 @@ def apply_rise_fall(waveform, samplingRate, riseTime, fallTime):
     fallVec = np.linspace(1, 0, nSamplesFall)
     newWaveform = waveform.copy()
     if (len(newWaveform)>nSamplesRise) and (len(waveform)>nSamplesFall):
+        if newWaveform.ndim > 1:
+            riseVec = riseVec[(slice(None),) + (np.newaxis,) * (newWaveform.ndim - 1)]
+            fallVec = fallVec[(slice(None),) + (np.newaxis,) * (newWaveform.ndim - 1)]
         newWaveform[:nSamplesRise] *= riseVec
         newWaveform[-nSamplesFall:] *= fallVec
     return newWaveform
+
 
 
 class SoundPlayer():

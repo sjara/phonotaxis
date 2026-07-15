@@ -80,7 +80,6 @@ class VideoThread(QThread):
             # Create buffers
             self.raw_buffer = SharedFrameBuffer(capacity=8, frame_shape=frame_shape, dtype=np.uint8)
             self.result_buffer = ResultBuffer()
-            self.record_buffer = SharedFrameBuffer(capacity=30, frame_shape=frame_shape, dtype=np.uint8)
             
             # Create inter-worker communication bus
             self.result_bus = ResultBus()
@@ -102,19 +101,21 @@ class VideoThread(QThread):
             )
             self.process_workers.append(primary_worker)
             
-            # Setup capture and record workers
+            # Setup record worker
+            self.record_worker = RecordWorker()
+            
+            # Setup capture worker
             if isinstance(self.camera_index, str):
                 self.capture_worker = FileCaptureWorker(
                     cap=self.cap,
                     process_buffers=[self.raw_buffer],
-                    record_buffer=self.record_buffer,
+                    record_worker=self.record_worker,
                     fps_limit=self.fps_limit,
                     loop=self.loop,
                     paused=self._paused
                 )
             else:
-                self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_buffer)
-            self.record_worker = RecordWorker(self.record_buffer)
+                self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_worker)
         
         # We will keep track of threads here
         self._capture_thread = None
@@ -247,6 +248,13 @@ class VideoThread(QThread):
         self.process_workers.append(worker)
         if hasattr(self, 'capture_worker') and worker.raw_buffer is not None:
             self.capture_worker.process_buffers.append(worker.raw_buffer)
+        
+        # If the video thread is already running, spawn and start the thread for this worker immediately
+        if self.isRunning() and self._run_flag:
+            import threading
+            t = threading.Thread(target=worker.run, daemon=True)
+            self._process_threads.append(t)
+            t.start()
 
     def store_tracking_data(self, timestamp, points):
         """

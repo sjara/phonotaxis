@@ -5,14 +5,15 @@ from .resultbus cimport WorkerResult, ResultBus
 cdef class CaptureWorker:
     cdef public object cap
     cdef public list process_buffers
-    cdef public SharedFrameBuffer record_buffer
+    cdef public RecordWorker record_worker
     cdef public bint running
     cdef public bint recording
+    cdef public int captured_count
 
 cdef class FileCaptureWorker:
     cdef public object cap
     cdef public list process_buffers
-    cdef public SharedFrameBuffer record_buffer
+    cdef public RecordWorker record_worker
     cdef public object fps_limit
     cdef public bint loop
     cdef public bint running
@@ -21,6 +22,8 @@ cdef class FileCaptureWorker:
     cdef public double file_fps
     cdef public int frame_width
     cdef public int frame_height
+    cdef public bint wait_on_full
+    cdef public int captured_count
 
 cdef class ContourTracker:
     cdef public int threshold
@@ -41,9 +44,11 @@ cdef class ProcessWorker:
     cdef public ResultBus _publish_bus
     cdef public object _on_start
     cdef public object _on_stop
+    cdef public int processed_count
 
 cdef class RecordWorker:
-    cdef public SharedFrameBuffer record_buffer
     cdef public bint running
     cdef public object _ffmpeg_process
     cdef public object _frame_size
+    cdef public int recorded_count
+    cpdef write_frame(self, double timestamp, cnp.ndarray[cnp.uint8_t, ndim=2] frame)
