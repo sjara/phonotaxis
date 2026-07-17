@@ -471,3 +471,48 @@ def test_worker_performance_counters():
     
     assert rec_worker.recorded_count == 1
 
+
+def test_process_worker_latest_only():
+    """Verify that ProcessWorker in bus mode with latest_only=True correctly drains the queue and processes only the latest item."""
+    bus = ResultBus()
+    res_buf = ResultBuffer()
+    
+    # Store processed messages
+    processed = []
+    def strategy(msg):
+        processed.append(msg.data['val'])
+        time.sleep(0.05) # Simulate time-consuming calculation
+        return {'processed': True}
+        
+    worker = ProcessWorker(
+        strategy=strategy,
+        result_buffer=res_buf,
+        name='test_worker',
+        bus=bus,
+        subscribe_to='upstream',
+        latest_only=True
+    )
+    
+    # Start worker thread
+    t = threading.Thread(target=worker.run, daemon=True)
+    t.start()
+    
+    # Publish 1st message — worker should start processing it
+    bus.publish(WorkerResult(1.0, {'val': 1}, 'upstream'))
+    time.sleep(0.01) # Wait a tiny bit to make sure worker is processing 1
+    
+    # While worker is processing 1, publish 2, 3, 4
+    bus.publish(WorkerResult(2.0, {'val': 2}, 'upstream'))
+    bus.publish(WorkerResult(3.0, {'val': 3}, 'upstream'))
+    bus.publish(WorkerResult(4.0, {'val': 4}, 'upstream'))
+    
+    # Wait for worker to finish processing
+    time.sleep(0.15)
+    worker.stop()
+    t.join(timeout=2.0)
+    
+    # Worker should have processed 1 (first message it picked up),
+    # then drained 2 and 3, and only processed 4 (the latest).
+    assert processed == [1, 4]
+
+

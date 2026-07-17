@@ -16,9 +16,6 @@ from PyQt6.QtCore import QCoreApplication, QTimer
 # Ensure the parent directory is in the path so we can import phonotaxis
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from phonotaxis.videomodule import VideoThread
-from phonotaxis.videoworkers import FileCaptureWorker
-
 
 def create_benchmark_video(filename, width, height, num_frames=1000):
     """
@@ -70,9 +67,24 @@ def main():
     parser.add_argument("--record", action="store_true", help="Enable video recording to /dev/null")
     parser.add_argument("--encoder", type=str, default="libx264", help="Video encoder for recording")
     parser.add_argument("--paradigm", type=str, default=None, help="Name of paradigm module from ptparadigms to benchmark (e.g. locomotion_action_space)")
+    parser.add_argument("--pure", action="store_true", help="Force the pure-Python fallback implementation")
+    parser.add_argument("--video", type=str, default=None, help="Path to an existing video file to use for benchmark")
+    parser.add_argument("--output-data", type=str, default="benchmark_data.csv", help="Path to write the ProcessWorker data output CSV")
+    parser.add_argument("--output-timing", type=str, default="benchmark_timing.csv", help="Path to write the worker timing log CSV")
     args = parser.parse_args()
 
-    # Generate synthetic video file
+    if args.pure:
+        print("Forcing pure-Python fallback implementation...")
+        import phonotaxis.sharedbuffer_pure as sb_pure
+        import phonotaxis.resultbus_pure as rb_pure
+        import phonotaxis.videoworkers_pure as vw_pure
+        sys.modules['phonotaxis.sharedbuffer'] = sb_pure
+        sys.modules['phonotaxis.resultbus'] = rb_pure
+        sys.modules['phonotaxis.videoworkers'] = vw_pure
+
+    from phonotaxis.videomodule import VideoThread
+
+    # Generate or load video file
     # We generate enough frames to satisfy the target FPS * duration (plus a buffer)
     # If FPS is 0 (unbounded), we generate 1500 frames to run a dense throughput test.
     fps_limit = args.fps if args.fps > 0 else -1.0
@@ -80,10 +92,27 @@ def main():
     num_frames = int(max(target_fps_for_video * args.duration * 1.5, 1000))
     
     temp_dir = tempfile.mkdtemp()
-    video_path = os.path.join(temp_dir, "benchmark_input.avi")
+    video_is_temp = False
+    if args.video:
+        if not os.path.exists(args.video):
+            print(f"Error: Video file '{args.video}' does not exist.")
+            sys.exit(1)
+        video_path = args.video
+    else:
+        video_path = os.path.join(temp_dir, "benchmark_input.avi")
+        video_is_temp = True
     
+    actual_width = args.width
+    actual_height = args.height
+    if args.video:
+        cap_info = cv2.VideoCapture(args.video)
+        actual_width = int(cap_info.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap_info.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap_info.release()
+
     try:
-        create_benchmark_video(video_path, args.width, args.height, num_frames)
+        if video_is_temp:
+            create_benchmark_video(video_path, args.width, args.height, num_frames)
         
         # Load and initialize VideoThread or Paradigm
         if args.paradigm:
@@ -145,9 +174,9 @@ def main():
         
         # Configure masks if specified
         if args.mask == "circular":
-            vt.set_circular_mask([args.width // 2, args.height // 2, args.width // 4])
+            vt.set_circular_mask([actual_width // 2, actual_height // 2, actual_width // 4])
         elif args.mask == "rectangular":
-            vt.set_rectangular_mask([args.width // 4, args.height // 4, 3 * args.width // 4, 3 * args.height // 4])
+            vt.set_rectangular_mask([actual_width // 4, actual_height // 4, 3 * actual_width // 4, 3 * actual_height // 4])
             
         # Ensure we simulate live-camera mode: do not block the capture thread on buffer full
         # This allows us to measure frame drops
@@ -174,13 +203,14 @@ def main():
         
         print("\nStarting benchmark...")
         print(f"  Duration:          {args.duration} s")
-        print(f"  Resolution:        {args.width}x{args.height}")
+        print(f"  Resolution:        {actual_width}x{actual_height}")
         print(f"  Target FPS:        {args.fps if args.fps > 0 else 'Unlimited (Max Throughput)'}")
         print(f"  Tracking:          {'ON' if not args.no_tracking else 'OFF'} ({args.mode} mode)")
         print(f"  Mask:              {args.mask}")
         print(f"  Recording:         {'ON (' + args.encoder + ')' if args.record else 'OFF'}")
         if args.paradigm:
             print(f"  Paradigm:          {args.paradigm}")
+        print(f"  Implementation:    {'pure-Python fallback' if args.pure else 'Cython optimized'}")
         
         start_time = time.time()
         
@@ -217,11 +247,68 @@ def main():
         if args.record:
             vt.stop_recording()
             
+        # Write CSV outputs if requested
+        all_timestamps = set()
+        for w in vt.process_workers:
+            all_timestamps.update(w.timing_history.keys())
+        sorted_timestamps = sorted(list(all_timestamps))
+        
+        capture_log = getattr(vt.capture_worker, 'capture_log', {})
+        
+        if args.output_timing and sorted_timestamps:
+            print(f"\nWriting timing log to {args.output_timing}...")
+            import csv
+            try:
+                with open(args.output_timing, mode='w', newline='') as f:
+                    writer = csv.writer(f)
+                    header = ['captured_timestamp', 'frame_number'] + [f"{w.name}_recv_emit" for w in vt.process_workers]
+                    writer.writerow(header)
+                    for t in sorted_timestamps:
+                        frame_num = capture_log.get(t, "")
+                        row = [t, frame_num]
+                        for w in vt.process_workers:
+                            val = w.timing_history.get(t, (None, None))
+                            row.append(str(val))
+                        writer.writerow(row)
+                print("Timing log written successfully.")
+            except Exception as e:
+                print(f"Error writing timing log: {e}")
+                
+        if args.output_data and sorted_timestamps:
+            print(f"Writing data output to {args.output_data}...")
+            import csv
+            all_keys = set()
+            for w in vt.process_workers:
+                for t in sorted_timestamps:
+                    if t in w.data_history:
+                        all_keys.update(w.data_history[t].keys())
+            sorted_keys = sorted(list(all_keys))
+            
+            try:
+                with open(args.output_data, mode='w', newline='') as f:
+                    writer = csv.writer(f)
+                    header = ['captured_timestamp', 'frame_number'] + sorted_keys
+                    writer.writerow(header)
+                    for t in sorted_timestamps:
+                        frame_num = capture_log.get(t, "")
+                        row = [t, frame_num]
+                        merged_data = {}
+                        for w in vt.process_workers:
+                            if t in w.data_history:
+                                merged_data.update(w.data_history[t])
+                        for key in sorted_keys:
+                            row.append(merged_data.get(key, ""))
+                        writer.writerow(row)
+                print("Data output written successfully.")
+            except Exception as e:
+                print(f"Error writing data output: {e}")
+            
         # Print results
         print("\n" + "="*50)
         print("                 BENCHMARK RESULTS")
         if args.paradigm:
             print(f"  Paradigm:          {args.paradigm}")
+        print(f"  Implementation:    {'pure-Python fallback' if args.pure else 'Cython optimized'}")
         print("="*50)
         print(f"Actual Runtime:     {elapsed_actual:.3f} s")
         print(f"Frames Captured:    {captured_count} ({capture_fps:.2f} fps)")
@@ -313,12 +400,16 @@ def main():
             
     finally:
         # Cleanup temporary files
-        if 'video_path' in locals() and os.path.exists(video_path):
-            os.remove(video_path)
+        if 'video_is_temp' in locals() and video_is_temp:
+            if 'video_path' in locals() and os.path.exists(video_path):
+                os.remove(video_path)
         if 'record_path' in locals() and os.path.exists(record_path):
             os.remove(record_path)
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            os.rmdir(temp_dir)
+            try:
+                os.rmdir(temp_dir)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
