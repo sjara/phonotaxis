@@ -68,13 +68,19 @@ class ResultBuffer:
     to the coordinator.  Stores ``WorkerResult`` objects.
     Adopts similar circular buffer logic as the legacy SharedFrameBuffer.
     """
-    def __init__(self, capacity: int = 1):
+    def __init__(self, capacity: int = 1, event: Optional[threading.Event] = None):
         self._capacity = capacity
         self._buffer = [None] * capacity
         self._write_idx = 0
         self._read_idx = 0
         self._items_available = 0
         self._lock = threading.Lock()
+        self._event = event
+
+    def set_event(self, event: threading.Event):
+        """Set a shared event to notify when a result is written."""
+        with self._lock:
+            self._event = event
         
     def try_write_result(self, result: WorkerResult):
         """Write a ``WorkerResult`` into the buffer (overwrites if full)."""
@@ -86,6 +92,9 @@ class ResultBuffer:
                 self._items_available += 1
             else:
                 self._read_idx = (self._read_idx + 1) % self._capacity
+            
+            if self._event is not None:
+                self._event.set()
             
     def try_read_result(self) -> Optional[WorkerResult]:
         """Non-blocking read.  Returns ``None`` if buffer is empty."""

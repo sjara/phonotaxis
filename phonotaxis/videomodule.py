@@ -75,7 +75,8 @@ class VideoThread(QThread):
             self.video_source = CV2VideoSource(self.camera_index)
 
         # Setup buffers and workers
-        self.result_buffer = ResultBuffer()
+        self._result_ready_event = threading.Event()
+        self.result_buffer = ResultBuffer(event=self._result_ready_event)
         
         # Create inter-worker communication bus
         self.result_bus = ResultBus()
@@ -246,6 +247,8 @@ class VideoThread(QThread):
             
     def add_process_worker(self, worker):
         """Register an additional ProcessWorker for parallel analysis."""
+        if hasattr(self, '_result_ready_event') and worker.result_buffer is not None:
+            worker.result_buffer.set_event(self._result_ready_event)
         self.process_workers.append(worker)
         if hasattr(self, 'capture_worker') and hasattr(self.capture_worker, 'process_buffers') and worker.raw_buffer is not None:
             self.capture_worker.process_buffers.append(worker.raw_buffer)
@@ -354,6 +357,9 @@ class VideoThread(QThread):
                         self.frame_processed.emit(timestamp, processed_frame, points, contour)
                     got_result = True
             
+            if got_result:
+                continue
+            
             # Check if file playback is finished and buffers are drained
             if isinstance(self.capture_worker, FileCaptureWorker) and not self._capture_thread.is_alive():
                 queues_empty = all(w._subscription_queue is None or w._subscription_queue.empty() for w in self.process_workers)
@@ -363,8 +369,9 @@ class VideoThread(QThread):
                     self._run_flag = False
                     break
 
-            if not got_result:
-                QThread.msleep(1)
+            # Block reactively on the shared event rather than polling
+            self._result_ready_event.wait(timeout=0.05)
+            self._result_ready_event.clear()
         
         # Shutdown workers sequentially
         self.capture_worker.stop()
