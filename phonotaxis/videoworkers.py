@@ -3,23 +3,29 @@ import queue
 import cv2
 import numpy as np
 import subprocess
+import threading
 from typing import Callable, List, Optional
-from .sharedbuffer import SharedFrameBuffer, ResultBuffer
-from .resultbus import WorkerResult, ResultBus
+from .sharedbuffer import ResultBuffer
+from .resultbus import WorkerResult, ResultBus, ResultRingBuffer
+from .videosource import VideoSource
 
 
 class CaptureWorker:
-    """Reads frames from cv2.VideoCapture, fans out to multiple buffers."""
-    def __init__(self, cap: cv2.VideoCapture,
-                 process_buffers: List[SharedFrameBuffer],
-                 record_worker = None):
-        self.cap = cap
-        self.process_buffers = process_buffers
-        self.record_worker = record_worker
+    """Reads frames from a VideoSource, publishes to ResultBus."""
+    def __init__(self, video_source: VideoSource, publish_to_bus: ResultBus, name: str = 'capture'):
+        self.video_source = video_source
+        self.publish_to_bus = publish_to_bus
+        self.name = name
         self.running: bool = True
-        self.recording: bool = False
+        self.ready_event = threading.Event()
+        self.error_message: Optional[str] = None
         self.captured_count: int = 0
         self.capture_log = {}
+        
+        # Properties cached during run()
+        self.fps: float = 0.0
+        self.frame_width: int = 0
+        self.frame_height: int = 0
 
     def _ensure_grayscale(self, frame):
         if len(frame.shape) == 3:
@@ -27,133 +33,153 @@ class CaptureWorker:
         return frame
 
     def run(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            timestamp = time.time()
-            if ret:
-                self.captured_count += 1
-                self.capture_log[timestamp] = self.captured_count
-                gray = self._ensure_grayscale(frame)
-                
-                for buf in self.process_buffers:
-                    buf.try_write(timestamp, gray)
-                
-                if self.recording and self.record_worker is not None:
-                    self.record_worker.write_frame(timestamp, gray)
-            else:
-                # To prevent tight loop on failure, sleep briefly
-                time.sleep(0.001)
+        if not self.video_source.open():
+            self.error_message = f"Failed to open video source: {self.video_source}"
+            self.ready_event.set()
+            return
+
+        self.fps = self.video_source.fps
+        self.frame_width = self.video_source.frame_width
+        self.frame_height = self.video_source.frame_height
+        self.ready_event.set()
+
+        try:
+            while self.running:
+                ret, frame = self.video_source.read()
+                timestamp = time.time()
+                if ret:
+                    self.captured_count += 1
+                    self.capture_log[timestamp] = self.captured_count
+                    gray = self._ensure_grayscale(frame)
+                    
+                    result = WorkerResult(timestamp, {'frame': gray}, self.name)
+                    self.publish_to_bus.publish(result)
+                else:
+                    time.sleep(0.001)
+        finally:
+            self.video_source.release()
 
     def stop(self):
         self.running = False
 
 
 class FileCaptureWorker:
-    """Reads frames from a video file cv2.VideoCapture, fans out to multiple buffers at a controlled rate."""
-    def __init__(self, cap: cv2.VideoCapture,
-                 process_buffers: List[SharedFrameBuffer],
-                 record_worker = None,
-                 fps_limit: Optional[float] = None,
-                 loop: bool = False,
-                 paused: bool = False,
-                 wait_on_full: bool = True):
-        self.cap = cap
-        self.process_buffers = process_buffers
-        self.record_worker = record_worker
+    """Reads frames from a VideoSource (file), publishes to ResultBus at controlled rate."""
+    def __init__(
+        self,
+        video_source: VideoSource,
+        publish_to_bus: ResultBus,
+        fps_limit: Optional[float] = None,
+        loop: bool = False,
+        paused: bool = False,
+        wait_on_full: bool = True,
+        name: str = 'capture'
+    ):
+        self.video_source = video_source
+        self.publish_to_bus = publish_to_bus
         self.fps_limit = fps_limit
         self.loop = loop
-        self.running: bool = True
-        self.recording: bool = False
         self.paused = paused
         self.wait_on_full = wait_on_full
+        self.name = name
+        self.running: bool = True
+        self.ready_event = threading.Event()
+        self.error_message: Optional[str] = None
         self.captured_count: int = 0
         self.capture_log = {}
         
-        # Get properties
-        self.file_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.file_fps <= 0:
-            self.file_fps = 30.0  # Fallback
-            
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+        self.fps = 30.0
+        self.frame_width = 0
+        self.frame_height = 0
+
+    @property
+    def file_fps(self) -> float:
+        return self.fps
+
+    @file_fps.setter
+    def file_fps(self, value: float):
+        self.fps = value
+
     def _ensure_grayscale(self, frame):
         if len(frame.shape) == 3:
             return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return frame
 
     def run(self):
-        # Determine target frame interval
+        if not self.video_source.open():
+            self.error_message = f"Failed to open video source: {self.video_source}"
+            self.ready_event.set()
+            return
+
+        self.file_fps = self.video_source.fps
+        self.frame_width = self.video_source.frame_width
+        self.frame_height = self.video_source.frame_height
+        self.ready_event.set()
+
         fps = self.fps_limit if self.fps_limit is not None else self.file_fps
         frame_interval = 1.0 / fps if fps > 0 else 0.0
         
         last_frame_time = time.time()
         
-        while self.running:
-            if self.paused:
-                time.sleep(0.01)
-                continue
-            # Control frame rate
-            if frame_interval > 0:
-                elapsed = time.time() - last_frame_time
-                sleep_dur = frame_interval - elapsed
-                if sleep_dur > 0:
-                    time.sleep(sleep_dur)
-            
-            # Wait if any process buffer is full to prevent frame drops
-            if self.wait_on_full:
-                while self.running:
-                    any_full = False
-                    for buf in self.process_buffers:
-                        if buf._items_available >= buf._capacity:
-                            any_full = True
+        try:
+            while self.running:
+                if self.paused:
+                    time.sleep(0.01)
+                    continue
+
+                if frame_interval > 0:
+                    elapsed = time.time() - last_frame_time
+                    sleep_dur = frame_interval - elapsed
+                    if sleep_dur > 0:
+                        time.sleep(sleep_dur)
+                
+                if self.wait_on_full:
+                    while self.running:
+                        any_full = False
+                        with self.publish_to_bus._lock:
+                            subs = self.publish_to_bus._subscribers.get(self.name, [])
+                            for q in subs:
+                                if q.full():
+                                    any_full = True
+                                    break
+                        if any_full:
+                            time.sleep(0.001)
+                        else:
                             break
-                    if any_full:
-                        time.sleep(0.001)
+
+                if not self.running:
+                    break
+
+                last_frame_time = time.time()
+                ret, frame = self.video_source.read()
+                
+                if not ret:
+                    if self.loop:
+                        if self.video_source.set_position(0):
+                            ret, frame = self.video_source.read()
+                            if not ret:
+                                break
+                        else:
+                            break
                     else:
                         break
-
-            if not self.running:
-                break
-
-            last_frame_time = time.time()
-            ret, frame = self.cap.read()
-            
-            if not ret:
-                if self.loop:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = self.cap.read()
-                    if not ret:
-                        break  # Failed to loop/reset
-                else:
-                    break  # End of file
-                    
-            self.captured_count += 1
-            timestamp = time.time()
-            self.capture_log[timestamp] = self.captured_count
-            gray = self._ensure_grayscale(frame)
-            
-            for buf in self.process_buffers:
-                buf.try_write(timestamp, gray)
+                        
+                self.captured_count += 1
+                timestamp = time.time()
+                self.capture_log[timestamp] = self.captured_count
+                gray = self._ensure_grayscale(frame)
                 
-            if self.recording and self.record_worker is not None:
-                self.record_worker.write_frame(timestamp, gray)
-                
+                result = WorkerResult(timestamp, {'frame': gray}, self.name)
+                self.publish_to_bus.publish(result)
+        finally:
+            self.video_source.release()
+
     def stop(self):
         self.running = False
 
 
 class ContourTracker:
-    """
-    Stateful strategy for contour-based dark-object tracking.
-
-    Extracted from the original ProcessWorker.process_frame logic.
-    Implements ``__call__`` so it can be injected into a generic
-    ``ProcessWorker``.
-
-    Call signature: ``(timestamp, frame) -> dict``
-    """
-
+    """Stateful strategy for contour-based dark-object tracking."""
     def __init__(self, threshold: int, minarea: int, tracking: bool = True):
         self.threshold: int = threshold
         self.minarea: int = minarea
@@ -163,8 +189,6 @@ class ContourTracker:
         self.mode: str = 'grayscale'
         self._cached_mask = None
         self._cached_key = None
-
-    # -- Mask helpers ------------------------------------------------
 
     def set_circular_mask(self, coords):
         self.mask_coords = coords
@@ -231,35 +255,26 @@ class ContourTracker:
             return self.apply_rectangular_mask(frame)
         return frame
 
-    # -- Core processing ---------------------------------------------
-
-    def __call__(self, timestamp: float, frame: np.ndarray) -> dict:
-        """
-        Process a single frame.
-
-        Returns:
-            dict with keys: processed_frame, points, contour, orientations
-        """
+    def __call__(self, msg: WorkerResult) -> dict:
+        timestamp = msg.timestamp
+        frame = msg.data['frame']
+        
         if not self.tracking:
             return {
-                'processed_frame': frame,
+                'frame': frame,
                 'points': (),
                 'contour': None,
                 'orientations': (0.0,),
             }
 
         masked_frame = self.apply_mask(frame)
-
         max_value = 255
         inverted_frame = cv2.bitwise_not(masked_frame)
         
-        # Apply Gaussian Blur to smooth pixel-level noise
         blurred = cv2.GaussianBlur(inverted_frame, (15, 15), 0)
-        
         ret, binary_frame = cv2.threshold(blurred, max_value - self.threshold,
                                           max_value, cv2.THRESH_BINARY)
         
-        # Apply Morphological Closing to fill gaps and holes in the binary region
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         binary_frame = cv2.morphologyEx(binary_frame, cv2.MORPH_CLOSE, kernel)
         
@@ -295,7 +310,7 @@ class ContourTracker:
             processed_frame = frame
 
         return {
-            'processed_frame': processed_frame,
+            'frame': processed_frame,
             'points': points,
             'contour': largest_contour,
             'orientations': orientations,
@@ -303,38 +318,16 @@ class ContourTracker:
 
 
 class ProcessWorker:
-    """
-    Generic video-pipeline worker.
-
-    Handles buffer I/O, lifecycle, and inter-worker notification.
-    Domain logic is injected as a *strategy* callable — no subclassing
-    required.
-
-    Two input modes (mutually exclusive):
-
-    1. **Frame mode** — reads from a ``SharedFrameBuffer`` (raw frames).
-       Strategy signature: ``(timestamp, frame) -> dict``
-    2. **Bus mode** — subscribes to a ``ResultBus`` topic.
-       Strategy signature: ``(WorkerResult) -> dict``
-
-    Output is always written to a ``ResultBuffer`` and optionally
-    published to a ``ResultBus`` for downstream workers.
-    """
-
+    """Generic video-pipeline worker subscribing to ResultBus and writing to ResultBuffer."""
     def __init__(
         self,
         strategy: Callable,
         result_buffer: ResultBuffer,
         *,
         name: str = 'worker',
-        # Frame mode (mutually exclusive with bus subscription)
-        raw_buffer: Optional[SharedFrameBuffer] = None,
-        # Bus mode
-        bus: Optional[ResultBus] = None,
-        subscribe_to: Optional[str] = None,
-        # Optional: publish own results to a bus
+        bus: ResultBus,
+        subscribe_to: str,
         publish_to_bus: Optional[ResultBus] = None,
-        # Lifecycle hooks
         on_start: Optional[Callable] = None,
         on_stop: Optional[Callable] = None,
         latest_only: bool = False,
@@ -342,80 +335,51 @@ class ProcessWorker:
         self.strategy = strategy
         self.result_buffer = result_buffer
         self.name = name
-        self.raw_buffer = raw_buffer
         self.running: bool = True
         self.is_processing: bool = False
         self.processed_count: int = 0
         self.latest_only: bool = latest_only
         self.timing_history = {}
         self.data_history = {}
+        self.raw_buffer = None
 
-        # Bus subscription setup
-        self._subscription_queue: Optional[queue.Queue] = None
-        if bus is not None and subscribe_to is not None:
-            self._subscription_queue = bus.subscribe(subscribe_to)
-
-        # Publishing setup
+        self._subscription_queue = bus.subscribe(subscribe_to)
         self._publish_bus = publish_to_bus
-
-        # Lifecycle hooks
         self._on_start = on_start
         self._on_stop = on_stop
 
     def run(self):
-        """Main loop — reads input, calls strategy, writes output."""
         if self._on_start is not None:
             self._on_start()
 
         while self.running:
-            if self.raw_buffer is not None:
-                # Frame mode
-                item = self.raw_buffer.read_blocking(timeout=0.05)
-                if item is None:
-                    continue
-                timestamp, frame = item
-                self.is_processing = True
-                recv_time = time.time()
-                try:
-                    result_data = self.strategy(timestamp, frame)
-                finally:
-                    self.is_processing = False
-                emit_time = time.time()
-                self.timing_history[timestamp] = (recv_time, emit_time)
-                if result_data is not None:
-                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
-            elif self._subscription_queue is not None:
-                # Bus mode
-                try:
-                    msg = self._subscription_queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
-                
-                # Drain queue if latest_only is enabled
-                if self.latest_only:
-                    while True:
-                        try:
-                            msg = self._subscription_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                            
-                self.is_processing = True
-                recv_time = time.time()
-                try:
-                    result_data = self.strategy(msg)
-                finally:
-                    self.is_processing = False
-                timestamp = msg.timestamp
-                emit_time = time.time()
-                self.timing_history[timestamp] = (recv_time, emit_time)
-                if result_data is not None:
-                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
-            else:
-                # No input source — sleep to prevent busy loop
-                time.sleep(0.05)
+            try:
+                msg = self._subscription_queue.get(timeout=0.05)
+            except queue.Empty:
                 continue
 
+            if self.latest_only:
+                while True:
+                    try:
+                        msg = self._subscription_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+            self.is_processing = True
+            recv_time = time.time()
+            try:
+                result_data = self.strategy(msg)
+            finally:
+                self.is_processing = False
+
+            timestamp = msg.timestamp
+            emit_time = time.time()
+            self.timing_history[timestamp] = (recv_time, emit_time)
+
             if result_data is not None:
+                self.data_history[timestamp] = {
+                    k: v for k, v in result_data.items() if k not in ('frame', 'contour')
+                }
                 self.processed_count += 1
                 result = WorkerResult(
                     timestamp=timestamp,
@@ -434,54 +398,107 @@ class ProcessWorker:
 
 
 class RecordWorker:
-    """Reads from record_buffer, writes frames via FFMPEG subprocess (GPU-accelerated)."""
-    def __init__(self, record_buffer=None):
+    """Reads from a subscription queue, writes frames via FFMPEG subprocess."""
+    def __init__(
+        self,
+        bus: ResultBus,
+        subscribe_to: str,
+        name: str = 'recorder',
+        queue_size: int = 128
+    ):
+        self.name = name
         self.running: bool = True
+        self.recording: bool = False
         self._ffmpeg_process: Optional[subprocess.Popen] = None
         self._frame_size = None
         self.recorded_count: int = 0
+        
+        self.filepath: Optional[str] = None
+        self.fps: float = 30.0
+        self.encoder: str = 'h264_nvenc'
+
+        self._subscription_queue = bus.subscribe(subscribe_to, maxsize=queue_size)
+        self._thread_started = False
+        self._thread_ident = None
 
     def initialize_writer(self, filepath, fps, frame_size, encoder='h264_nvenc'):
         self._frame_size = frame_size
         width, height = frame_size
         
-        # Build ffmpeg command
         cmd = [
             'ffmpeg',
-            '-y', # Overwrite
+            '-y',
             '-f', 'rawvideo',
             '-vcodec', 'rawvideo',
             '-s', f'{width}x{height}',
-            '-pix_fmt', 'gray', # Mono camera
+            '-pix_fmt', 'gray',
             '-r', str(fps),
-            '-thread_queue_size', '2048', # Queue up to 2048 raw frames in ffmpeg internal buffer
-            '-i', '-', # Read from stdin
+            '-thread_queue_size', '2048',
+            '-i', '-',
             '-c:v', encoder,
-            '-bufsize', '6M', # Set rate control VBV buffer size
-            '-pix_fmt', 'yuv420p', # For compatibility
+            '-bufsize', '6M',
+            '-pix_fmt', 'yuv420p',
             filepath
         ]
         
         try:
-            # We want to see output to stderr for debugging ffmpeg issues
-            self._ffmpeg_process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self._ffmpeg_process = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         except Exception as e:
             print(f"Failed to start ffmpeg with {encoder}: {e}")
             cmd[cmd.index(encoder)] = 'libx264'
             try:
-                self._ffmpeg_process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                self._ffmpeg_process = subprocess.Popen(
+                    cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
             except Exception as e:
                 print(f"Failed to start ffmpeg fallback: {e}")
                 self._ffmpeg_process = None
 
     def release_writer(self):
-        if self._ffmpeg_process is not None:
-            if self._ffmpeg_process.stdin:
-                self._ffmpeg_process.stdin.close()
-            self._ffmpeg_process.wait()
+        if self._thread_started and threading.get_ident() != self._thread_ident:
+            return
+            
+        proc = self._ffmpeg_process
+        if proc is not None:
             self._ffmpeg_process = None
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def terminate_writer(self):
+        proc = self._ffmpeg_process
+        if proc is not None:
+            self._ffmpeg_process = None
+            try:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+
+    def start_recording(self, filepath, fps, encoder='h264_nvenc'):
+        self.filepath = filepath
+        self.fps = fps
+        self.encoder = encoder
+        self.recording = True
+
+    def stop_recording(self):
+        self.recording = False
+        self.release_writer()
 
     def write_frame(self, timestamp, frame):
+        if self._ffmpeg_process is None and self.filepath is not None:
+            height, width = frame.shape[:2]
+            self.initialize_writer(self.filepath, self.fps, (width, height), self.encoder)
+            
         if self._ffmpeg_process is not None and self._ffmpeg_process.stdin is not None:
             try:
                 self._ffmpeg_process.stdin.write(frame.tobytes())
@@ -491,9 +508,21 @@ class RecordWorker:
                 pass
 
     def run(self):
-        while self.running:
-            time.sleep(0.01)
+        self._thread_started = True
+        self._thread_ident = threading.get_ident()
+        
+        try:
+            while self.running:
+                try:
+                    msg = self._subscription_queue.get(timeout=0.01)
+                    if self.recording:
+                        frame = msg.data.get('frame')
+                        if frame is not None:
+                            self.write_frame(msg.timestamp, frame)
+                except queue.Empty:
+                    continue
+        finally:
+            self.release_writer()
 
     def stop(self):
         self.running = False
-        self.release_writer()

@@ -4,6 +4,7 @@ Benchmark utility for measuring the maximum framerate and latency of the
 phonotaxis VideoThread multithreaded pipeline.
 """
 
+from numpy._core import fromnumeric
 import os
 import sys
 import time
@@ -39,6 +40,70 @@ def create_benchmark_video(filename, width, height, num_frames=1000):
         
     out.release()
     print("Temporary video generated successfully.")
+
+
+class MemoryVideoCapture:
+    """
+    In-memory video reader that pre-loads all frames from a video file into RAM
+    and mocks the cv2.VideoCapture interface. This eliminates disk I/O and video
+    decoding bottlenecks during benchmarking.
+    """
+    def __init__(self, filepath, num_frames=1000):
+        self.filepath = filepath
+        self.frames = []
+        
+        print(f"Pre-loading video '{filepath}' into RAM to bypass decoding bottlenecks...")
+        cap = cv2.VideoCapture(filepath)
+        if not cap.isOpened():
+            raise IOError(f"Could not open video file for preloading: {filepath}")
+            
+        self.fps = cap.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0:
+            self.fps = 30.0
+        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        while len(self.frames) < num_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            self.frames.append(frame)
+            
+        cap.release()
+        self.num_frames = len(self.frames)
+        print(f"Loaded {self.num_frames} frames into memory.")
+        self.idx = 0
+        self.opened = True
+        
+    def isOpened(self):
+        return self.opened
+        
+    def get(self, propId):
+        if propId == cv2.CAP_PROP_FPS:
+            return self.fps
+        elif propId == cv2.CAP_PROP_FRAME_WIDTH:
+            return self.width
+        elif propId == cv2.CAP_PROP_FRAME_HEIGHT:
+            return self.height
+        return 0.0
+        
+    def read(self):
+        if not self.opened or self.num_frames == 0:
+            return False, None
+        
+        frame = self.frames[self.idx]
+        self.idx = (self.idx + 1) % self.num_frames
+        return True, frame.copy()
+        
+    def set(self, propId, value):
+        if propId == cv2.CAP_PROP_POS_FRAMES:
+            self.idx = int(value) % self.num_frames
+            return True
+        return False
+        
+    def release(self):
+        self.opened = False
+        self.frames = []
 
 
 def print_ascii_histogram(data, bins=10, max_width=40):
@@ -168,6 +233,13 @@ def main():
         elif args.mask == "rectangular":
             vt.set_rectangular_mask([actual_width // 4, actual_height // 4, 3 * actual_width // 4, 3 * actual_height // 4])
             
+        # Replace the real file-based VideoCapture with a pre-loaded in-memory reader to avoid disk/decoding bottlenecks
+        mem_cap = MemoryVideoCapture(video_path,num_frames)
+        if hasattr(vt.capture_worker, 'video_source') and hasattr(vt.capture_worker.video_source, 'cap'):
+            vt.capture_worker.video_source.cap = mem_cap
+        else:
+            vt.capture_worker.cap = mem_cap
+
         # Ensure we simulate live-camera mode: do not block the capture thread on buffer full
         # This allows us to measure frame drops
         vt.capture_worker.wait_on_full = False
@@ -177,7 +249,7 @@ def main():
         if args.record:
             # We want to record using the selected encoder
             vt.record_worker.release_writer()
-            vt.start_recording(record_path)
+            vt.start_recording(record_path, encoder=args.encoder)
             
         # Benchmarking state variables
         latencies = []

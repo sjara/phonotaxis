@@ -64,21 +64,38 @@ class SharedFrameBuffer:
 
 class ResultBuffer:
     """
-    Lock-protected buffer for a ProcessWorker to pass results back
+    Lock-protected circular buffer for a ProcessWorker to pass results back
     to the coordinator.  Stores ``WorkerResult`` objects.
+    Adopts similar circular buffer logic as the legacy SharedFrameBuffer.
     """
-    def __init__(self):
+    def __init__(self, capacity: int = 1):
+        self._capacity = capacity
+        self._buffer = [None] * capacity
+        self._write_idx = 0
+        self._read_idx = 0
+        self._items_available = 0
         self._lock = threading.Lock()
-        self._result: Optional[WorkerResult] = None
         
     def try_write_result(self, result: WorkerResult):
-        """Write a ``WorkerResult`` into the buffer (overwrites previous)."""
+        """Write a ``WorkerResult`` into the buffer (overwrites if full)."""
         with self._lock:
-            self._result = result
+            self._buffer[self._write_idx] = result
+            self._write_idx = (self._write_idx + 1) % self._capacity
+            
+            if self._items_available < self._capacity:
+                self._items_available += 1
+            else:
+                self._read_idx = (self._read_idx + 1) % self._capacity
             
     def try_read_result(self) -> Optional[WorkerResult]:
         """Non-blocking read.  Returns ``None`` if buffer is empty."""
         with self._lock:
-            res = self._result
-            self._result = None
+            if self._items_available == 0:
+                return None
+            res = self._buffer[self._read_idx]
+            self._buffer[self._read_idx] = None  # Allow GC
+            
+            self._read_idx = (self._read_idx + 1) % self._capacity
+            self._items_available -= 1
             return res
+

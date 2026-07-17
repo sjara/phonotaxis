@@ -6,40 +6,11 @@ import cv2
 import tempfile
 import os
 import threading
-from phonotaxis.sharedbuffer import SharedFrameBuffer, ResultBuffer
+from phonotaxis.sharedbuffer import ResultBuffer
 from phonotaxis.videoworkers import ProcessWorker, ContourTracker, FileCaptureWorker, RecordWorker
 from phonotaxis.videomodule import VideoThread
 from phonotaxis.resultbus import WorkerResult, ResultBus
-
-# ---------------------------------------------------------------------------
-# SharedFrameBuffer tests
-# ---------------------------------------------------------------------------
-
-def test_shared_frame_buffer_write_read():
-    buf = SharedFrameBuffer(3, (10, 10))
-    frame1 = np.ones((10, 10), dtype=np.uint8)
-    
-    buf.try_write(1.0, frame1)
-    
-    res = buf.try_read()
-    assert res is not None
-    ts, f = res
-    assert ts == 1.0
-    assert np.array_equal(f, frame1)
-
-def test_shared_frame_buffer_overflow():
-    buf = SharedFrameBuffer(2, (10, 10))
-    
-    buf.try_write(1.0, np.ones((10, 10), dtype=np.uint8) * 1)
-    buf.try_write(2.0, np.ones((10, 10), dtype=np.uint8) * 2)
-    buf.try_write(3.0, np.ones((10, 10), dtype=np.uint8) * 3)
-    
-    # Oldest (1.0) should be overwritten, so we read 2.0 then 3.0
-    res1 = buf.try_read()
-    assert res1[0] == 2.0
-    res2 = buf.try_read()
-    assert res2[0] == 3.0
-    assert buf.try_read() is None
+from phonotaxis.videosource import CV2VideoSource
 
 # ---------------------------------------------------------------------------
 # ContourTracker tests
@@ -52,7 +23,8 @@ def test_contour_tracker_process_frame():
     frame = np.ones((100, 100), dtype=np.uint8) * 255
     frame[40:60, 40:60] = 0
     
-    result = tracker(0.0, frame)
+    msg = WorkerResult(0.0, {'frame': frame}, 'capture')
+    result = tracker(msg)
     
     assert isinstance(result, dict)
     assert result['points'] != ((-1,-1),)
@@ -66,7 +38,8 @@ def test_contour_tracker_no_tracking():
     tracker = ContourTracker(threshold=128, minarea=10, tracking=False)
     frame = np.ones((100, 100), dtype=np.uint8) * 255
     
-    result = tracker(0.0, frame)
+    msg = WorkerResult(0.0, {'frame': frame}, 'capture')
+    result = tracker(msg)
     
     assert result['points'] == ()
     assert result['contour'] is None
@@ -159,42 +132,6 @@ def test_result_bus_no_subscribers():
 # Generic ProcessWorker tests
 # ---------------------------------------------------------------------------
 
-def test_process_worker_frame_mode():
-    """Verify generic worker reads from buffer, calls strategy, writes result."""
-    buf = SharedFrameBuffer(4, (10, 10))
-    res_buf = ResultBuffer()
-    
-    # Simple strategy that returns a dict
-    def strategy(timestamp, frame):
-        return {'mean': float(np.mean(frame))}
-    
-    worker = ProcessWorker(
-        strategy=strategy,
-        result_buffer=res_buf,
-        name='test',
-        raw_buffer=buf,
-    )
-    
-    # Write a frame
-    frame = np.ones((10, 10), dtype=np.uint8) * 42
-    buf.try_write(1.0, frame)
-    
-    # Run worker in a thread, let it process one frame, then stop
-    import threading
-    t = threading.Thread(target=worker.run, daemon=True)
-    t.start()
-    
-    # Give it time to process
-    time.sleep(0.2)
-    worker.stop()
-    t.join(timeout=2.0)
-    
-    result = res_buf.try_read_result()
-    assert result is not None
-    assert result.timestamp == 1.0
-    assert result.data['mean'] == 42.0
-    assert result.worker_name == 'test'
-
 def test_process_worker_bus_mode():
     """Verify generic worker subscribes to bus and processes messages."""
     bus = ResultBus()
@@ -230,30 +167,31 @@ def test_process_worker_bus_mode():
 
 def test_process_worker_publishes_to_bus():
     """Verify worker publishes its own results to a downstream bus."""
-    in_buf = SharedFrameBuffer(4, (10, 10))
+    bus = ResultBus()
     res_buf = ResultBuffer()
     out_bus = ResultBus()
     
     # Subscribe before worker starts
     downstream_q = out_bus.subscribe('publisher')
     
-    def strategy(timestamp, frame):
-        return {'sum': int(np.sum(frame))}
+    def strategy(msg):
+        return {'sum': int(np.sum(msg.data['frame']))}
     
     worker = ProcessWorker(
         strategy=strategy,
         result_buffer=res_buf,
         name='publisher',
-        raw_buffer=in_buf,
+        bus=bus,
+        subscribe_to='capture',
         publish_to_bus=out_bus,
     )
-    
-    frame = np.ones((10, 10), dtype=np.uint8) * 3
-    in_buf.try_write(2.0, frame)
     
     import threading
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
+    
+    frame = np.ones((10, 10), dtype=np.uint8) * 3
+    bus.publish(WorkerResult(2.0, {'frame': frame}, 'capture'))
     
     time.sleep(0.2)
     worker.stop()
@@ -294,14 +232,12 @@ def test_file_capture_worker_basic():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=30, num_frames=10)
         
-        cap = cv2.VideoCapture(video_path)
-        raw_buffer = SharedFrameBuffer(capacity=15, frame_shape=(100, 100))
+        video_source = CV2VideoSource(video_path)
+        bus = ResultBus()
+        q = bus.subscribe('capture', maxsize=15)
         
-        # Test paced mode
-        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=30, loop=False)
-        assert worker.file_fps == 30.0
-        assert worker.frame_width == 100
-        assert worker.frame_height == 100
+        worker = FileCaptureWorker(video_source, publish_to_bus=bus, fps_limit=30, loop=False)
+        assert worker.fps_limit == 30.0
         
         t = threading.Thread(target=worker.run, daemon=True)
         t.start()
@@ -309,7 +245,8 @@ def test_file_capture_worker_basic():
         
         # We should have read exactly 10 frames
         count = 0
-        while raw_buffer.try_read() is not None:
+        while not q.empty():
+            q.get_nowait()
             count += 1
         assert count == 10
 
@@ -319,18 +256,19 @@ def test_file_capture_worker_benchmark():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=30, num_frames=15)
         
-        cap = cv2.VideoCapture(video_path)
-        raw_buffer = SharedFrameBuffer(capacity=20, frame_shape=(100, 100))
+        video_source = CV2VideoSource(video_path)
+        bus = ResultBus()
+        q = bus.subscribe('capture', maxsize=20)
         
-        # Test benchmark mode (fps_limit=0 or negative)
-        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=0, loop=False)
+        worker = FileCaptureWorker(video_source, publish_to_bus=bus, fps_limit=None, loop=False)
         
         t = threading.Thread(target=worker.run, daemon=True)
         t.start()
         t.join(timeout=1.0)
         
         count = 0
-        while raw_buffer.try_read() is not None:
+        while not q.empty():
+            q.get_nowait()
             count += 1
         assert count == 15
 
@@ -340,22 +278,22 @@ def test_file_capture_worker_loop():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=1000, num_frames=5)
         
-        cap = cv2.VideoCapture(video_path)
-        raw_buffer = SharedFrameBuffer(capacity=20, frame_shape=(100, 100))
+        video_source = CV2VideoSource(video_path)
+        bus = ResultBus()
+        q = bus.subscribe('capture', maxsize=100)
         
-        # Test looping mode
-        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=1000, loop=True)
+        worker = FileCaptureWorker(video_source, publish_to_bus=bus, fps_limit=1000, loop=True)
         
         t = threading.Thread(target=worker.run, daemon=True)
         t.start()
         
-        # Let it run for a short duration; it should read more than 5 frames due to looping
         time.sleep(0.1)
         worker.stop()
         t.join(timeout=1.0)
         
         count = 0
-        while raw_buffer.try_read() is not None:
+        while not q.empty():
+            q.get_nowait()
             count += 1
         assert count > 5
 
@@ -365,19 +303,15 @@ def test_video_thread_file_integration():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=30, num_frames=10)
         
-        # Initialize VideoThread with string path
         vt = VideoThread(camera_index=video_path, tracking=True, fps_limit=30, loop=False)
         assert isinstance(vt.capture_worker, FileCaptureWorker)
         vt.set_minarea(10)
         
         vt.start()
-        # Wait for the thread to exit (which it should automatically do when the file ends)
-        assert vt.wait(2000)  # Wait up to 2 seconds for clean auto-termination
+        assert vt.wait(2000)
         
-        # Verify that tracking was successful and generated coordinates
         assert len(vt.timestamps) == 10
         assert len(vt.points) > 0
-        # The moving spot was tracked, coordinates shouldn't be (-1, -1)
         assert vt.points[0][0] != (-1, -1)
 
 
@@ -386,10 +320,10 @@ def test_file_capture_worker_captured_count():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=100, num_frames=10)
         
-        cap = cv2.VideoCapture(video_path)
-        raw_buffer = SharedFrameBuffer(capacity=20, frame_shape=(100, 100))
+        video_source = CV2VideoSource(video_path)
+        bus = ResultBus()
         
-        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=100, loop=False)
+        worker = FileCaptureWorker(video_source, publish_to_bus=bus, fps_limit=100, loop=False)
         assert worker.captured_count == 0
         
         t = threading.Thread(target=worker.run, daemon=True)
@@ -404,46 +338,45 @@ def test_file_capture_worker_wait_on_full_disabled():
         video_path = os.path.join(tmpdir, "test.avi")
         create_dummy_video(video_path, fps=1000, num_frames=15)
         
-        cap = cv2.VideoCapture(video_path)
-        raw_buffer = SharedFrameBuffer(capacity=5, frame_shape=(100, 100))
+        video_source = CV2VideoSource(video_path)
+        bus = ResultBus()
+        q = bus.subscribe('capture', maxsize=5)
         
-        # Test with wait_on_full=False
-        worker = FileCaptureWorker(cap, process_buffers=[raw_buffer], fps_limit=1000, loop=False, wait_on_full=False)
+        worker = FileCaptureWorker(video_source, publish_to_bus=bus, fps_limit=1000, loop=False, wait_on_full=False)
         assert worker.wait_on_full is False
         
         t = threading.Thread(target=worker.run, daemon=True)
         t.start()
         t.join(timeout=2.0)
         
-        # It should read all 15 frames without waiting
         assert worker.captured_count == 15
         
-        # Buffer only holds at most 5 items because it overwrites rather than waiting
         count = 0
-        while raw_buffer.try_read() is not None:
+        while not q.empty():
+            q.get_nowait()
             count += 1
         assert count == 5
 
 
 def test_worker_performance_counters():
-    """Verify that processed_count on ProcessWorker and recorded_count on RecordWorker increment correctly."""
-    buf = SharedFrameBuffer(5, (10, 10))
+    bus = ResultBus()
     res_buf = ResultBuffer()
     
     worker = ProcessWorker(
-        strategy=lambda ts, f: {'val': 1},
+        strategy=lambda msg: {'val': 1},
         result_buffer=res_buf,
         name='test_worker',
-        raw_buffer=buf,
+        bus=bus,
+        subscribe_to='capture',
     )
     assert worker.processed_count == 0
     
-    # Write frames and run worker
-    buf.try_write(1.0, np.zeros((10, 10), dtype=np.uint8))
-    buf.try_write(2.0, np.zeros((10, 10), dtype=np.uint8))
-    
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
+    
+    bus.publish(WorkerResult(1.0, {'frame': np.zeros((10, 10), dtype=np.uint8)}, 'capture'))
+    bus.publish(WorkerResult(2.0, {'frame': np.zeros((10, 10), dtype=np.uint8)}, 'capture'))
+    
     time.sleep(0.1)
     worker.stop()
     t.join(timeout=2.0)
@@ -451,10 +384,9 @@ def test_worker_performance_counters():
     assert worker.processed_count == 2
     
     # Test RecordWorker
-    rec_worker = RecordWorker()
+    rec_worker = RecordWorker(bus=bus, subscribe_to='capture')
     assert rec_worker.recorded_count == 0
     
-    # mock _ffmpeg_process
     class MockFFmpeg:
         def __init__(self):
             class MockStdin:
@@ -473,15 +405,13 @@ def test_worker_performance_counters():
 
 
 def test_process_worker_latest_only():
-    """Verify that ProcessWorker in bus mode with latest_only=True correctly drains the queue and processes only the latest item."""
     bus = ResultBus()
     res_buf = ResultBuffer()
     
-    # Store processed messages
     processed = []
     def strategy(msg):
         processed.append(msg.data['val'])
-        time.sleep(0.05) # Simulate time-consuming calculation
+        time.sleep(0.05)
         return {'processed': True}
         
     worker = ProcessWorker(
@@ -493,26 +423,18 @@ def test_process_worker_latest_only():
         latest_only=True
     )
     
-    # Start worker thread
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
     
-    # Publish 1st message — worker should start processing it
     bus.publish(WorkerResult(1.0, {'val': 1}, 'upstream'))
-    time.sleep(0.01) # Wait a tiny bit to make sure worker is processing 1
+    time.sleep(0.01)
     
-    # While worker is processing 1, publish 2, 3, 4
     bus.publish(WorkerResult(2.0, {'val': 2}, 'upstream'))
     bus.publish(WorkerResult(3.0, {'val': 3}, 'upstream'))
     bus.publish(WorkerResult(4.0, {'val': 4}, 'upstream'))
     
-    # Wait for worker to finish processing
     time.sleep(0.15)
     worker.stop()
     t.join(timeout=2.0)
     
-    # Worker should have processed 1 (first message it picked up),
-    # then drained 2 and 3, and only processed 4 (the latest).
     assert processed == [1, 4]
-
-

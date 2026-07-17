@@ -14,6 +14,7 @@ import threading
 from .sharedbuffer import SharedFrameBuffer, ResultBuffer
 from .videoworkers import CaptureWorker, ProcessWorker, RecordWorker, ContourTracker, FileCaptureWorker
 from .resultbus import ResultBus, WorkerResult
+from .videosource import VideoSource, CV2VideoSource
 
 # --- Configuration ---
 #FOURCC_CODEC = cv2.VideoWriter_fourcc(*'XVID')  # Codec for AVI files. 'MP4V' for .mp4
@@ -32,14 +33,13 @@ class VideoThread(QThread):
         frame_processed (float, np.ndarray, tuple): Emits the timestamp, processed frame,
                                                     and (x,y) of points of interest.
     """
-    #new_frame_signal = pyqtSignal(np.ndarray)
     camera_error_signal = pyqtSignal(str)
     frame_processed = pyqtSignal(float, np.ndarray, tuple, object) # Emits timestamp, frame, points, and contour
 
     def __init__(self, camera_index=0, mode='grayscale', tracking=False, debug=False, fps_limit=None, loop=False, start_paused=False):
         """
         Args:
-            camera_index (int or str): Index of the camera or path to a video file.
+            camera_index (int or str or VideoSource): Index of the camera, path to a video file, or a VideoSource.
             mode (str): Type of image emitted: ['grayscale', 'binary']
                         Note that this does not affect the saved video.
             tracking (bool): Whether to track the largest dark object in the video.
@@ -53,8 +53,6 @@ class VideoThread(QThread):
         self.fps_limit = fps_limit
         self.loop = loop
         self._run_flag = True
-        self.cap = None
-        self.out = None # Initialize video writer to None
         self.fps = None
         self._mode = mode
         self.tracking = tracking
@@ -69,58 +67,60 @@ class VideoThread(QThread):
         self.points = []  # List where each element is a list of (x,y) coordinates for one point across time
 
         self.debug = debug
-        self.initialize_camera()
         
+        # Setup VideoSource
+        if isinstance(self.camera_index, VideoSource):
+            self.video_source = self.camera_index
+        else:
+            self.video_source = CV2VideoSource(self.camera_index)
+
         # Setup buffers and workers
-        if self.cap and self.cap.isOpened():
-            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            frame_shape = (frame_height, frame_width)
-            
-            # Create buffers
-            self.raw_buffer = SharedFrameBuffer(capacity=600, frame_shape=frame_shape, dtype=np.uint8)
-            self.result_buffer = ResultBuffer()
-            
-            # Create inter-worker communication bus
-            self.result_bus = ResultBus()
-            
-            self.process_workers = []
-            
-            # Setup contour-tracking strategy and primary worker
-            self.contour_tracker = ContourTracker(
-                self.threshold, self.minarea, tracking=self.tracking
-            )
-            self.contour_tracker.mode = self._mode
-            
-            primary_worker = ProcessWorker(
-                strategy=self.contour_tracker,
-                result_buffer=self.result_buffer,
-                name='contour_tracker',
-                raw_buffer=self.raw_buffer,
+        self.result_buffer = ResultBuffer()
+        
+        # Create inter-worker communication bus
+        self.result_bus = ResultBus()
+        
+        self.process_workers = []
+        
+        # Setup contour-tracking strategy and primary worker
+        self.contour_tracker = ContourTracker(
+            self.threshold, self.minarea, tracking=self.tracking
+        )
+        self.contour_tracker.mode = self._mode
+        
+        primary_worker = ProcessWorker(
+            strategy=self.contour_tracker,
+            result_buffer=self.result_buffer,
+            name='contour_tracker',
+            bus=self.result_bus,
+            subscribe_to='capture',
+            publish_to_bus=self.result_bus,
+        )
+        self.process_workers.append(primary_worker)
+        
+        # Setup record worker
+        self.record_worker = RecordWorker(bus=self.result_bus, subscribe_to='capture')
+        
+        # Setup capture worker
+        if isinstance(self.camera_index, str):
+            self.capture_worker = FileCaptureWorker(
+                video_source=self.video_source,
                 publish_to_bus=self.result_bus,
+                fps_limit=self.fps_limit,
+                loop=self.loop,
+                paused=self._paused
             )
-            self.process_workers.append(primary_worker)
-            
-            # Setup record worker
-            self.record_worker = RecordWorker()
-            
-            # Setup capture worker
-            if isinstance(self.camera_index, str):
-                self.capture_worker = FileCaptureWorker(
-                    cap=self.cap,
-                    process_buffers=[self.raw_buffer],
-                    record_worker=self.record_worker,
-                    fps_limit=self.fps_limit,
-                    loop=self.loop,
-                    paused=self._paused
-                )
-            else:
-                self.capture_worker = CaptureWorker(self.cap, [self.raw_buffer], self.record_worker)
+        else:
+            self.capture_worker = CaptureWorker(
+                video_source=self.video_source,
+                publish_to_bus=self.result_bus
+            )
         
         # We will keep track of threads here
         self._capture_thread = None
         self._process_threads = []
         self._record_thread = None
+
 
     @property
     def mask_coords(self):
@@ -221,6 +221,13 @@ class VideoThread(QThread):
             return None
 
     @property
+    def cap(self):
+        if hasattr(self, 'video_source') and isinstance(self.video_source, CV2VideoSource):
+            self.video_source.open()
+            return self.video_source.cap
+        return None
+
+    @property
     def mode(self):
         if hasattr(self, 'contour_tracker'):
             return self.contour_tracker.mode
@@ -238,15 +245,9 @@ class VideoThread(QThread):
         self.mode = mode_val
             
     def add_process_worker(self, worker):
-        """Register an additional ProcessWorker for parallel analysis.
-
-        The worker can operate in frame mode (with its own raw_buffer) or
-        bus mode (subscribing to another worker's results via the
-        ResultBus).  If the worker has a ``raw_buffer``, the capture
-        worker is updated to fan out frames to it.
-        """
+        """Register an additional ProcessWorker for parallel analysis."""
         self.process_workers.append(worker)
-        if hasattr(self, 'capture_worker') and worker.raw_buffer is not None:
+        if hasattr(self, 'capture_worker') and hasattr(self.capture_worker, 'process_buffers') and worker.raw_buffer is not None:
             self.capture_worker.process_buffers.append(worker.raw_buffer)
         
         # If the video thread is already running, spawn and start the thread for this worker immediately
@@ -259,13 +260,6 @@ class VideoThread(QThread):
     def store_tracking_data(self, timestamp, points):
         """
         Appends timestamp and points to the tracking lists whenever tracking is enabled.
-        
-        Tracking data is stored independently of video recording, allowing you to
-        save tracking data without necessarily saving the raw video file.
-        
-        Args:
-            timestamp (float): The timestamp of the frame.
-            points (tuple): The points of interest detected in the frame.
         """
         if self.tracking:
             self.timestamps.append(timestamp)
@@ -279,65 +273,34 @@ class VideoThread(QThread):
                 self.points[i].append(point)
                 
     def initialize_camera(self):
-        self.cap = cv2.VideoCapture(self.camera_index)
-        if not self.cap.isOpened():
-            if isinstance(self.camera_index, str):
-                self.camera_error_signal.emit(f"Could not open video file: {self.camera_index}")
-            else:
-                self.camera_error_signal.emit(f"Could not open camera at index {self.camera_index}. " +
-                                              "Please check if the camera is connected and not " +
-                                              "in use by another application.")
-            self._run_flag = False
-            return
+        pass
 
-    def start_recording(self, filepath=None):
-        """
-        Starts the video recording. This should be called after setting the output file.
-        """
+    def start_recording(self, filepath=None, fps=None, encoder='h264_nvenc'):
+        """Starts the video recording. This should be called after setting the output file."""
         if filepath is not None:
             self.filepath = filepath
-            self.initialize_video_writer(self.filepath)
+            dir_path = os.path.dirname(self.filepath)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path)
             self.recording_status = True
-            if hasattr(self, 'capture_worker'):
-                self.capture_worker.recording = True
+            
+            recording_fps = fps if fps is not None else getattr(self.capture_worker, 'fps', RECORDING_FPS)
+            if recording_fps <= 0:
+                recording_fps = RECORDING_FPS
+                
+            self.record_worker.start_recording(self.filepath, recording_fps, encoder)
             print(f"Video recording started: {self.filepath}")
         else:
-            print("Video recording not started: No output file set or writer not initialized.")
+            print("Video recording not started: No output file set.")
         
     def stop_recording(self):
-        """
-        Stops the video recording and releases the video writer.
-        """
+        """Stops the video recording."""
         self.recording_status = False
-        if hasattr(self, 'capture_worker'):
-            self.capture_worker.recording = False
+        self.record_worker.stop_recording()
         print("Video recording stopped.")
             
     def initialize_video_writer(self, filepath):
-        # Create the directory if it does not exist
-        self.filepath = filepath
-        dir_path = os.path.dirname(self.filepath)
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path)
-
-        # Get video properties for saving
-        frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0:
-            self.fps = RECORDING_FPS
-
-        # Initialize FFMPEG VideoWriter
-        if hasattr(self, 'record_worker'):
-            try:
-                self.record_worker.initialize_writer(self.filepath, self.fps, (frame_width, frame_height))
-                print(f"Recording video to {self.filepath} at {self.fps} FPS, " +
-                      f"resolution {frame_width}x{frame_height} via FFMPEG")
-            except Exception as e:
-                self.camera_error_signal.emit(f"Error initializing video writer: {e}")
-                self._run_flag = False
-                return
+        pass
         
     def run(self):
         """
@@ -347,24 +310,30 @@ class VideoThread(QThread):
         if not hasattr(self, 'capture_worker'):
             return
 
-        # Calculate proper frame interval based on desired FPS
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0:  # If FPS is not set or invalid, use a default value
-            self.fps = RECORDING_FPS
-            print('Warning: The camera did not return a valid FPS. ')
-            print('The FPS of the video file will not be accurate. Using default FPS:', self.fps)
-        else:
-            print('Camera reported FPS:', self.fps)
-
-        # Start worker threads
+        # Start capture worker thread
         self._capture_thread = threading.Thread(target=self.capture_worker.run, daemon=True)
+        self._capture_thread.start()
+        
+        # Wait for capture worker to open the source and be ready
+        if not self.capture_worker.ready_event.wait(timeout=5.0):
+            self.camera_error_signal.emit("Timeout waiting for camera to initialize.")
+            self._run_flag = False
+            return
+            
+        if self.capture_worker.error_message:
+            self.camera_error_signal.emit(self.capture_worker.error_message)
+            self._run_flag = False
+            return
+
+        self.fps = self.capture_worker.fps
+
+        # Start process and record worker threads
         self._process_threads = []
         for worker in self.process_workers:
             t = threading.Thread(target=worker.run, daemon=True)
             self._process_threads.append(t)
         self._record_thread = threading.Thread(target=self.record_worker.run, daemon=True)
         
-        self._capture_thread.start()
         for t in self._process_threads:
             t.start()
         self._record_thread.start()
@@ -376,7 +345,7 @@ class VideoThread(QThread):
                 result = worker.result_buffer.try_read_result()
                 if result is not None:
                     data = result.data
-                    processed_frame = data.get('processed_frame')
+                    processed_frame = data.get('frame')
                     points = data.get('points')
                     if processed_frame is not None and isinstance(points, (tuple, list)):
                         timestamp = result.timestamp
@@ -387,18 +356,17 @@ class VideoThread(QThread):
             
             # Check if file playback is finished and buffers are drained
             if isinstance(self.capture_worker, FileCaptureWorker) and not self._capture_thread.is_alive():
-                raw_empty = (self.raw_buffer._items_available == 0)
                 queues_empty = all(w._subscription_queue is None or w._subscription_queue.empty() for w in self.process_workers)
                 workers_idle = all(not w.is_processing for w in self.process_workers)
-                results_empty = all(w.result_buffer._result is None for w in self.process_workers)
-                if raw_empty and queues_empty and workers_idle and results_empty:
+                results_empty = all(w.result_buffer._items_available == 0 for w in self.process_workers)
+                if queues_empty and workers_idle and results_empty:
                     self._run_flag = False
                     break
 
             if not got_result:
                 QThread.msleep(1)
         
-        # Shutdown workers sequentially to prevent broken pipe / write-to-closed-file errors
+        # Shutdown workers sequentially
         self.capture_worker.stop()
         if self._capture_thread.is_alive():
             self._capture_thread.join(timeout=2.0)
@@ -413,8 +381,6 @@ class VideoThread(QThread):
         if self._record_thread.is_alive():
             self._record_thread.join(timeout=2.0)
         
-        if self.cap:
-            self.cap.release()
         print("Video thread stopped and resources released.")
     
     def append_to_file(self, h5file):
