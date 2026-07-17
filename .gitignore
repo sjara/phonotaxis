@@ -5,6 +5,8 @@ __pycache__/
 
 # Old code
 old/*
+soundmodule.py
+tests/test_soundmodule.py
 
 # Implementation plans (for coding agents)
 implementation_plans/
@@ -17,7 +19,8 @@ artifacts/
 config.py
 
 # C extensions
-*.so
+**.so
+**/.c
 
 # Distribution / packaging
 .Python
