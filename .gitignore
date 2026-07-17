@@ -18,7 +18,10 @@ config.py
 
 # C extensions
 **.so
-**/.c
+**.c
+
+# Data / logs
+**benchmark*.csv
 
 # Distribution / packaging
 .Python

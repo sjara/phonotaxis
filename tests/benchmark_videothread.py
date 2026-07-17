@@ -67,20 +67,10 @@ def main():
     parser.add_argument("--record", action="store_true", help="Enable video recording to /dev/null")
     parser.add_argument("--encoder", type=str, default="libx264", help="Video encoder for recording")
     parser.add_argument("--paradigm", type=str, default=None, help="Name of paradigm module from ptparadigms to benchmark (e.g. locomotion_action_space)")
-    parser.add_argument("--pure", action="store_true", help="Force the pure-Python fallback implementation")
     parser.add_argument("--video", type=str, default=None, help="Path to an existing video file to use for benchmark")
-    parser.add_argument("--output-data", type=str, default="benchmark_data.csv", help="Path to write the ProcessWorker data output CSV")
-    parser.add_argument("--output-timing", type=str, default="benchmark_timing.csv", help="Path to write the worker timing log CSV")
+    parser.add_argument("--output-data", type=str, default="tests/benchmark_data.csv", help="Path to write the ProcessWorker data output CSV")
+    parser.add_argument("--output-timing", type=str, default="tests/benchmark_timing.csv", help="Path to write the worker timing log CSV")
     args = parser.parse_args()
-
-    if args.pure:
-        print("Forcing pure-Python fallback implementation...")
-        import phonotaxis.sharedbuffer_pure as sb_pure
-        import phonotaxis.resultbus_pure as rb_pure
-        import phonotaxis.videoworkers_pure as vw_pure
-        sys.modules['phonotaxis.sharedbuffer'] = sb_pure
-        sys.modules['phonotaxis.resultbus'] = rb_pure
-        sys.modules['phonotaxis.videoworkers'] = vw_pure
 
     from phonotaxis.videomodule import VideoThread
 
@@ -210,7 +200,6 @@ def main():
         print(f"  Recording:         {'ON (' + args.encoder + ')' if args.record else 'OFF'}")
         if args.paradigm:
             print(f"  Paradigm:          {args.paradigm}")
-        print(f"  Implementation:    {'pure-Python fallback' if args.pure else 'Cython optimized'}")
         
         start_time = time.time()
         
@@ -308,7 +297,6 @@ def main():
         print("                 BENCHMARK RESULTS")
         if args.paradigm:
             print(f"  Paradigm:          {args.paradigm}")
-        print(f"  Implementation:    {'pure-Python fallback' if args.pure else 'Cython optimized'}")
         print("="*50)
         print(f"Actual Runtime:     {elapsed_actual:.3f} s")
         print(f"Frames Captured:    {captured_count} ({capture_fps:.2f} fps)")
