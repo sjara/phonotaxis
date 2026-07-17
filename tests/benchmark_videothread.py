@@ -274,9 +274,12 @@ def main():
             print(f"  Paradigm:          {args.paradigm}")
         
         start_time = time.time()
+        end_time = start_time
         
         # Timer to stop the benchmark after the specified duration
         def stop_benchmark():
+            nonlocal end_time
+            end_time = time.time()
             print("\nStopping benchmark...")
             vt.stop()
             app.quit()
@@ -293,7 +296,6 @@ def main():
         app.exec()
         
         # Benchmark finished: extract statistics
-        end_time = time.time()
         elapsed_actual = end_time - start_time
         
         captured_count = vt.capture_worker.captured_count

@@ -128,10 +128,12 @@ class FileCaptureWorker:
                     continue
 
                 if frame_interval > 0:
-                    elapsed = time.time() - last_frame_time
-                    sleep_dur = frame_interval - elapsed
-                    if sleep_dur > 0:
-                        time.sleep(sleep_dur)
+                    target_time = last_frame_time + frame_interval
+                    sleep_dur = target_time - time.time()
+                    if sleep_dur > 0.0015:
+                        time.sleep(sleep_dur - 0.001)
+                    while time.time() < target_time:
+                        pass
                 
                 if self.wait_on_full:
                     while self.running:
