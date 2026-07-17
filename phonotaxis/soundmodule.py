@@ -35,8 +35,8 @@ def apply_rise_fall(waveform, samplingRate, riseTime, fallTime):
     fallVec = np.linspace(1, 0, nSamplesFall)
     newWaveform = waveform.copy()
     if (len(newWaveform)>nSamplesRise) and (len(waveform)>nSamplesFall):
-        newWaveform[:nSamplesRise] *= riseVec
-        newWaveform[-nSamplesFall:] *= fallVec
+        newWaveform[:nSamplesRise] *= riseVec[:,np.newaxis]
+        newWaveform[-nSamplesFall:] *= fallVec[:,np.newaxis]
     return newWaveform
 
 
