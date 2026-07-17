@@ -78,7 +78,7 @@ class VideoThread(QThread):
             frame_shape = (frame_height, frame_width)
             
             # Create buffers
-            self.raw_buffer = SharedFrameBuffer(capacity=8, frame_shape=frame_shape, dtype=np.uint8)
+            self.raw_buffer = SharedFrameBuffer(capacity=600, frame_shape=frame_shape, dtype=np.uint8)
             self.result_buffer = ResultBuffer()
             
             # Create inter-worker communication bus
@@ -398,17 +398,18 @@ class VideoThread(QThread):
             if not got_result:
                 QThread.msleep(1)
         
-        # Shutdown workers
+        # Shutdown workers sequentially to prevent broken pipe / write-to-closed-file errors
         self.capture_worker.stop()
-        for worker in self.process_workers:
-            worker.stop()
-        self.record_worker.stop()
-        
         if self._capture_thread.is_alive():
             self._capture_thread.join(timeout=2.0)
+            
+        for worker in self.process_workers:
+            worker.stop()
         for t in self._process_threads:
             if t.is_alive():
                 t.join(timeout=2.0)
+                
+        self.record_worker.stop()
         if self._record_thread.is_alive():
             self._record_thread.join(timeout=2.0)
         
