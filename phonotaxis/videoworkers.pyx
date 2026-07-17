@@ -19,6 +19,7 @@ cdef class CaptureWorker:
         self.running = True
         self.recording = False
         self.captured_count = 0
+        self.capture_log = {}
 
     def _ensure_grayscale(self, cnp.ndarray frame):
         if frame.ndim == 3:
@@ -37,6 +38,7 @@ cdef class CaptureWorker:
             timestamp = time.time()
             if ret:
                 self.captured_count += 1
+                self.capture_log[timestamp] = self.captured_count
                 gray = self._ensure_grayscale(frame)
                 
                 for buf in self.process_buffers:
@@ -71,6 +73,7 @@ cdef class FileCaptureWorker:
         self.paused = paused
         self.wait_on_full = wait_on_full
         self.captured_count = 0
+        self.capture_log = {}
         
         # Get properties
         self.file_fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -145,6 +148,7 @@ cdef class FileCaptureWorker:
                     
             self.captured_count += 1
             timestamp = time.time()
+            self.capture_log[timestamp] = self.captured_count
             gray = self._ensure_grayscale(frame)
             
             for buf in self.process_buffers:
@@ -175,6 +179,8 @@ cdef class ContourTracker:
         self.mask_enabled = False
         self.mask_coords = None
         self.mode = 'grayscale'
+        self._cached_mask = None
+        self._cached_key = None
 
     # -- Mask helpers ------------------------------------------------
 
@@ -189,11 +195,12 @@ cdef class ContourTracker:
     def disable_mask(self):
         self.mask_enabled = False
         self.mask_coords = None
+        self._cached_mask = None
+        self._cached_key = None
 
     def apply_circular_mask(self, cnp.ndarray frame):
         if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 3:
             return frame
-        cdef cnp.ndarray masked_frame = frame.copy()
         cdef int height = frame.shape[0]
         cdef int width = frame.shape[1]
         cdef int center_x = self.mask_coords[0]
@@ -201,16 +208,21 @@ cdef class ContourTracker:
         cdef int radius = self.mask_coords[2]
         if radius <= 0:
             return frame
-        y_coords, x_coords = np.ogrid[:height, :width]
-        distance_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-        mask_outside_circle = distance_from_center > radius
-        masked_frame[mask_outside_circle] = 255
+            
+        cdef tuple key = (height, width, center_x, center_y, radius)
+        if self._cached_key != key or self._cached_mask is None:
+            y_coords, x_coords = np.ogrid[:height, :width]
+            distance_sq = (x_coords - center_x)**2 + (y_coords - center_y)**2
+            self._cached_mask = distance_sq > radius**2
+            self._cached_key = key
+            
+        cdef cnp.ndarray masked_frame = frame.copy()
+        masked_frame[self._cached_mask] = 255
         return masked_frame
 
     def apply_rectangular_mask(self, cnp.ndarray frame):
         if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 4:
             return frame
-        cdef cnp.ndarray masked_frame = frame.copy()
         cdef int height = frame.shape[0]
         cdef int width = frame.shape[1]
         cdef object x1_obj = self.mask_coords[0]
@@ -224,9 +236,16 @@ cdef class ContourTracker:
         cdef int y2 = min(height, y2_obj) if y2_obj is not None else height
         if x1 >= x2 or y1 >= y2:
             return frame
-        mask = np.ones_like(frame) * 255
-        mask[y1:y2, x1:x2] = 0
-        masked_frame[mask == 255] = 255
+            
+        cdef tuple key = (height, width, x1, y1, x2, y2)
+        if self._cached_key != key or self._cached_mask is None:
+            mask = np.ones((height, width), dtype=np.bool_)
+            mask[y1:y2, x1:x2] = False
+            self._cached_mask = mask
+            self._cached_key = key
+            
+        cdef cnp.ndarray masked_frame = frame.copy()
+        masked_frame[self._cached_mask] = 255
         return masked_frame
 
     def apply_mask(self, cnp.ndarray frame):
@@ -349,6 +368,7 @@ cdef class ProcessWorker:
         # Lifecycle hooks
         object on_start = None,
         object on_stop = None,
+        bint latest_only = False,
     ):
         self.strategy = strategy
         self.result_buffer = result_buffer
@@ -357,6 +377,9 @@ cdef class ProcessWorker:
         self.running = True
         self.is_processing = False
         self.processed_count = 0
+        self.latest_only = latest_only
+        self.timing_history = {}
+        self.data_history = {}
 
         # Bus subscription setup
         self._subscription_queue = None
@@ -378,6 +401,8 @@ cdef class ProcessWorker:
         cdef object msg
         cdef dict result_data
         cdef WorkerResult result
+        cdef double recv_time
+        cdef double emit_time
 
         if self._on_start is not None:
             self._on_start()
@@ -390,22 +415,41 @@ cdef class ProcessWorker:
                     continue
                 timestamp, frame = item
                 self.is_processing = True
+                recv_time = time.time()
                 try:
                     result_data = self.strategy(timestamp, frame)
                 finally:
                     self.is_processing = False
+                emit_time = time.time()
+                self.timing_history[timestamp] = (recv_time, emit_time)
+                if result_data is not None:
+                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
             elif self._subscription_queue is not None:
                 # Bus mode
                 try:
                     msg = self._subscription_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
+                
+                # Drain queue if latest_only is enabled
+                if self.latest_only:
+                    while True:
+                        try:
+                            msg = self._subscription_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                            
                 self.is_processing = True
+                recv_time = time.time()
                 try:
                     result_data = self.strategy(msg)
                 finally:
                     self.is_processing = False
                 timestamp = msg.timestamp
+                emit_time = time.time()
+                self.timing_history[timestamp] = (recv_time, emit_time)
+                if result_data is not None:
+                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
             else:
                 # No input source — sleep to prevent busy loop
                 time.sleep(0.05)

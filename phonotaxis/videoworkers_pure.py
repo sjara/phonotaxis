@@ -19,6 +19,7 @@ class CaptureWorker:
         self.running: bool = True
         self.recording: bool = False
         self.captured_count: int = 0
+        self.capture_log = {}
 
     def _ensure_grayscale(self, frame):
         if len(frame.shape) == 3:
@@ -31,6 +32,7 @@ class CaptureWorker:
             timestamp = time.time()
             if ret:
                 self.captured_count += 1
+                self.capture_log[timestamp] = self.captured_count
                 gray = self._ensure_grayscale(frame)
                 
                 for buf in self.process_buffers:
@@ -65,6 +67,7 @@ class FileCaptureWorker:
         self.paused = paused
         self.wait_on_full = wait_on_full
         self.captured_count: int = 0
+        self.capture_log = {}
         
         # Get properties
         self.file_fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -127,6 +130,7 @@ class FileCaptureWorker:
                     
             self.captured_count += 1
             timestamp = time.time()
+            self.capture_log[timestamp] = self.captured_count
             gray = self._ensure_grayscale(frame)
             
             for buf in self.process_buffers:
@@ -157,6 +161,8 @@ class ContourTracker:
         self.mask_enabled: bool = False
         self.mask_coords: Optional[list] = None
         self.mode: str = 'grayscale'
+        self._cached_mask = None
+        self._cached_key = None
 
     # -- Mask helpers ------------------------------------------------
 
@@ -171,25 +177,31 @@ class ContourTracker:
     def disable_mask(self):
         self.mask_enabled = False
         self.mask_coords = None
+        self._cached_mask = None
+        self._cached_key = None
 
     def apply_circular_mask(self, frame):
         if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 3:
             return frame
-        masked_frame = frame.copy()
         height, width = frame.shape
         center_x, center_y, radius = self.mask_coords
         if radius <= 0:
             return frame
-        y_coords, x_coords = np.ogrid[:height, :width]
-        distance_from_center = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-        mask_outside_circle = distance_from_center > radius
-        masked_frame[mask_outside_circle] = 255
+            
+        key = (height, width, center_x, center_y, radius)
+        if self._cached_key != key or self._cached_mask is None:
+            y_coords, x_coords = np.ogrid[:height, :width]
+            distance_sq = (x_coords - center_x)**2 + (y_coords - center_y)**2
+            self._cached_mask = distance_sq > radius**2
+            self._cached_key = key
+            
+        masked_frame = frame.copy()
+        masked_frame[self._cached_mask] = 255
         return masked_frame
 
     def apply_rectangular_mask(self, frame):
         if not self.mask_enabled or self.mask_coords is None or len(self.mask_coords) != 4:
             return frame
-        masked_frame = frame.copy()
         height, width = frame.shape
         x1, y1, x2, y2 = self.mask_coords
         x1 = max(0, x1)
@@ -198,9 +210,16 @@ class ContourTracker:
         y2 = min(height, y2) if y2 is not None else height
         if x1 >= x2 or y1 >= y2:
             return frame
-        mask = np.ones_like(frame) * 255
-        mask[y1:y2, x1:x2] = 0
-        masked_frame[mask == 255] = 255
+            
+        key = (height, width, x1, y1, x2, y2)
+        if self._cached_key != key or self._cached_mask is None:
+            mask = np.ones((height, width), dtype=np.bool_)
+            mask[y1:y2, x1:x2] = False
+            self._cached_mask = mask
+            self._cached_key = key
+            
+        masked_frame = frame.copy()
+        masked_frame[self._cached_mask] = 255
         return masked_frame
 
     def apply_mask(self, frame):
@@ -318,6 +337,7 @@ class ProcessWorker:
         # Lifecycle hooks
         on_start: Optional[Callable] = None,
         on_stop: Optional[Callable] = None,
+        latest_only: bool = False,
     ):
         self.strategy = strategy
         self.result_buffer = result_buffer
@@ -326,6 +346,9 @@ class ProcessWorker:
         self.running: bool = True
         self.is_processing: bool = False
         self.processed_count: int = 0
+        self.latest_only: bool = latest_only
+        self.timing_history = {}
+        self.data_history = {}
 
         # Bus subscription setup
         self._subscription_queue: Optional[queue.Queue] = None
@@ -352,22 +375,41 @@ class ProcessWorker:
                     continue
                 timestamp, frame = item
                 self.is_processing = True
+                recv_time = time.time()
                 try:
                     result_data = self.strategy(timestamp, frame)
                 finally:
                     self.is_processing = False
+                emit_time = time.time()
+                self.timing_history[timestamp] = (recv_time, emit_time)
+                if result_data is not None:
+                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
             elif self._subscription_queue is not None:
                 # Bus mode
                 try:
                     msg = self._subscription_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
+                
+                # Drain queue if latest_only is enabled
+                if self.latest_only:
+                    while True:
+                        try:
+                            msg = self._subscription_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                            
                 self.is_processing = True
+                recv_time = time.time()
                 try:
                     result_data = self.strategy(msg)
                 finally:
                     self.is_processing = False
                 timestamp = msg.timestamp
+                emit_time = time.time()
+                self.timing_history[timestamp] = (recv_time, emit_time)
+                if result_data is not None:
+                    self.data_history[timestamp] = {k: v for k, v in result_data.items() if k not in ('processed_frame', 'contour')}
             else:
                 # No input source — sleep to prevent busy loop
                 time.sleep(0.05)

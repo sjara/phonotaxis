@@ -9,6 +9,7 @@ cdef class CaptureWorker:
     cdef public bint running
     cdef public bint recording
     cdef public int captured_count
+    cdef public dict capture_log
 
 cdef class FileCaptureWorker:
     cdef public object cap
@@ -24,6 +25,7 @@ cdef class FileCaptureWorker:
     cdef public int frame_height
     cdef public bint wait_on_full
     cdef public int captured_count
+    cdef public dict capture_log
 
 cdef class ContourTracker:
     cdef public int threshold
@@ -32,6 +34,8 @@ cdef class ContourTracker:
     cdef public bint mask_enabled
     cdef public list mask_coords
     cdef public str mode
+    cdef public object _cached_mask
+    cdef public tuple _cached_key
 
 cdef class ProcessWorker:
     cdef public object strategy
@@ -45,6 +49,9 @@ cdef class ProcessWorker:
     cdef public object _on_start
     cdef public object _on_stop
     cdef public int processed_count
+    cdef public bint latest_only
+    cdef public dict timing_history
+    cdef public dict data_history
 
 cdef class RecordWorker:
     cdef public bint running
