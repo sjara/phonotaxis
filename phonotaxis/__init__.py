@@ -11,7 +11,3 @@ configPath = os.path.join(_configDir,_configBasename)
 _spec = importlib.util.spec_from_file_location('phonotaxis.config', configPath)
 config = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(config)
-
-from . import sharedbuffer, resultbus, videoworkers
-
-
