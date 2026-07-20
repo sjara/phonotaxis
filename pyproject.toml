@@ -37,5 +37,4 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["phonotaxis*"]
-exclude = ["tests*", "devel*", "artifacts*", "implementation_plans*"]
+include = ["phonotaxis"]
