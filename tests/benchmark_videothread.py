@@ -18,13 +18,18 @@ from PyQt6.QtCore import QCoreApplication, QTimer
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
-def create_benchmark_video(filename, width, height, num_frames=1000):
+def create_benchmark_video(filename, width, height, num_frames=100):
     """
     Generates a synthetic video containing a dark moving circle on a light background.
     This simulates a rodent's movement for realistic contour tracking.
     """
     print(f"Generating temporary video ({num_frames} frames, {width}x{height})...")
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == '.mp4':
+        # Use FFV1 (lossless compression) as mp4 does not support raw video natively
+        fourcc = cv2.VideoWriter_fourcc(*'FFV1')
+    else:
+        fourcc = 0  # Raw/Uncompressed AVI
     out = cv2.VideoWriter(filename, fourcc, 30.0, (width, height), isColor=False)
     
     for i in range(num_frames):
@@ -40,70 +45,6 @@ def create_benchmark_video(filename, width, height, num_frames=1000):
         
     out.release()
     print("Temporary video generated successfully.")
-
-
-class MemoryVideoCapture:
-    """
-    In-memory video reader that pre-loads all frames from a video file into RAM
-    and mocks the cv2.VideoCapture interface. This eliminates disk I/O and video
-    decoding bottlenecks during benchmarking.
-    """
-    def __init__(self, filepath, num_frames=1000):
-        self.filepath = filepath
-        self.frames = []
-        
-        print(f"Pre-loading video '{filepath}' into RAM to bypass decoding bottlenecks...")
-        cap = cv2.VideoCapture(filepath)
-        if not cap.isOpened():
-            raise IOError(f"Could not open video file for preloading: {filepath}")
-            
-        self.fps = cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0:
-            self.fps = 30.0
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        while len(self.frames) < num_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            self.frames.append(frame)
-            
-        cap.release()
-        self.num_frames = len(self.frames)
-        print(f"Loaded {self.num_frames} frames into memory.")
-        self.idx = 0
-        self.opened = True
-        
-    def isOpened(self):
-        return self.opened
-        
-    def get(self, propId):
-        if propId == cv2.CAP_PROP_FPS:
-            return self.fps
-        elif propId == cv2.CAP_PROP_FRAME_WIDTH:
-            return self.width
-        elif propId == cv2.CAP_PROP_FRAME_HEIGHT:
-            return self.height
-        return 0.0
-        
-    def read(self):
-        if not self.opened or self.num_frames == 0:
-            return False, None
-        
-        frame = self.frames[self.idx]
-        self.idx = (self.idx + 1) % self.num_frames
-        return True, frame.copy()
-        
-    def set(self, propId, value):
-        if propId == cv2.CAP_PROP_POS_FRAMES:
-            self.idx = int(value) % self.num_frames
-            return True
-        return False
-        
-    def release(self):
-        self.opened = False
-        self.frames = []
 
 
 def print_ascii_histogram(data, bins=10, max_width=40):
@@ -144,7 +85,6 @@ def main():
     # If FPS is 0 (unbounded), we generate 1500 frames to run a dense throughput test.
     fps_limit = args.fps if args.fps > 0 else -1.0
     target_fps_for_video = args.fps if args.fps > 0 else 300.0
-    num_frames = int(max(target_fps_for_video * args.duration * 1.5, 1000))
     
     temp_dir = tempfile.mkdtemp()
     video_is_temp = False
@@ -153,9 +93,11 @@ def main():
             print(f"Error: Video file '{args.video}' does not exist.")
             sys.exit(1)
         video_path = args.video
+        num_frames = int(max(target_fps_for_video * args.duration * 1.5, 1000))
     else:
-        video_path = os.path.join(temp_dir, "benchmark_input.avi")
+        video_path = os.path.join(temp_dir, "benchmark_input.mp4")
         video_is_temp = True
+        num_frames = 100  # Minimal frames to cover one full rodent rotation cycle (loops automatically)
     
     actual_width = args.width
     actual_height = args.height
@@ -233,13 +175,6 @@ def main():
         elif args.mask == "rectangular":
             vt.set_rectangular_mask([actual_width // 4, actual_height // 4, 3 * actual_width // 4, 3 * actual_height // 4])
             
-        # Replace the real file-based VideoCapture with a pre-loaded in-memory reader to avoid disk/decoding bottlenecks
-        mem_cap = MemoryVideoCapture(video_path,num_frames)
-        if hasattr(vt.capture_worker, 'video_source') and hasattr(vt.capture_worker.video_source, 'cap'):
-            vt.capture_worker.video_source.cap = mem_cap
-        else:
-            vt.capture_worker.cap = mem_cap
-
         # Ensure we simulate live-camera mode: do not block the capture thread on buffer full
         # This allows us to measure frame drops
         vt.capture_worker.wait_on_full = False
@@ -272,18 +207,62 @@ def main():
         print(f"  Recording:         {'ON (' + args.encoder + ')' if args.record else 'OFF'}")
         if args.paradigm:
             print(f"  Paradigm:          {args.paradigm}")
+        print("  Press Enter or Ctrl+C to stop the benchmark early and report results.")
         
         start_time = time.time()
         end_time = start_time
         
+        import signal
+        import threading
+        from PyQt6.QtCore import QObject, pyqtSignal
+        
         # Timer to stop the benchmark after the specified duration
+        stop_called = False
         def stop_benchmark():
-            nonlocal end_time
+            nonlocal end_time, stop_called
+            if stop_called:
+                return
+            stop_called = True
             end_time = time.time()
             print("\nStopping benchmark...")
             vt.stop()
             app.quit()
             
+        # Signaler class to bridge thread communication (Qt calls must be on GUI thread)
+        class ThreadSignaler(QObject):
+            stop_signal = pyqtSignal()
+            
+        signaler = ThreadSignaler()
+        signaler.stop_signal.connect(stop_benchmark)
+            
+        # Setup SIGINT (Ctrl+C) handler for graceful exit
+        def sigint_handler(signum, frame):
+            print("\nReceived SIGINT (Ctrl+C). Terminating early...")
+            signaler.stop_signal.emit()
+            
+        signal.signal(signal.SIGINT, sigint_handler)
+        
+        # Periodic timer to allow Python signal handling when event loop is running
+        sig_timer = QTimer()
+        sig_timer.start(100)
+        sig_timer.timeout.connect(lambda: None)
+        
+        # Spawn daemon thread to monitor stdin for termination keypress
+        def monitor_stdin():
+            try:
+                while True:
+                    line = sys.stdin.readline()
+                    if not line:  # EOF
+                        break
+                    print("\nReceived stop command from stdin.")
+                    signaler.stop_signal.emit()
+                    break
+            except Exception:
+                pass
+                
+        stdin_thread = threading.Thread(target=monitor_stdin, daemon=True)
+        stdin_thread.start()
+        
         QTimer.singleShot(int(args.duration * 1000), stop_benchmark)
         
         # Start VideoThread
