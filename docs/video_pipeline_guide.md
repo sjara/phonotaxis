@@ -695,9 +695,6 @@ python devel/benchmark_videothread.py \
     --video /path/to/session.avi \
     --paradigm locomotion_action_space \
     --fps 210 --record --encoder h264_nvenc
-
-# Compare pure-Python vs. Cython builds
-python devel/benchmark_videothread.py --fps 210 --pure
 ```
 
 **Reported metrics:**

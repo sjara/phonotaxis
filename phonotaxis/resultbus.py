@@ -3,7 +3,7 @@ Inter-worker result pub/sub channel.
 
 Provides a lightweight, thread-safe mechanism for ProcessWorkers to
 share results with downstream workers without direct coupling.
-No Qt dependencies — suitable for Cython compilation.
+No Qt dependencies.
 """
 
 import threading
