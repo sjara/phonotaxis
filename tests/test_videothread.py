@@ -6,7 +6,7 @@ import cv2
 import tempfile
 import os
 import threading
-from phonotaxis.sharedbuffer import ResultBuffer
+from phonotaxis.resultbus import SharedBuffer as ResultBuffer
 from phonotaxis.videoworkers import ProcessWorker, ContourTracker, FileCaptureWorker, RecordWorker
 from phonotaxis.videomodule import VideoThread
 from phonotaxis.resultbus import WorkerResult, ResultBus

@@ -11,9 +11,8 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QObject
 import threading
-from .sharedbuffer import SharedFrameBuffer, ResultBuffer
 from .videoworkers import CaptureWorker, ProcessWorker, RecordWorker, ContourTracker, FileCaptureWorker
-from .resultbus import ResultBus, WorkerResult
+from .resultbus import ResultBus, WorkerResult, SharedBuffer
 from .videosource import VideoSource, CV2VideoSource
 
 # --- Configuration ---
@@ -76,7 +75,7 @@ class VideoThread(QThread):
 
         # Setup buffers and workers
         self._result_ready_event = threading.Event()
-        self.result_buffer = ResultBuffer(event=self._result_ready_event)
+        self.result_buffer = SharedBuffer(event=self._result_ready_event)
         
         # Create inter-worker communication bus
         self.result_bus = ResultBus()
