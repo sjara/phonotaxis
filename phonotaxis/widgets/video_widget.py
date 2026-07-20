@@ -2,7 +2,9 @@
 Video display widget for phonotaxis applications.
 """
 
-from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QCheckBox
+import cv2
+import math
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QPolygonF
 from .slider_widget import SliderWidget
@@ -76,6 +78,13 @@ class VideoWidget(QWidget):
         # Checkboxes row
         checkbox_layout = QHBoxLayout()
         
+        # Add Play/Pause button
+        self.play_pause_button = QPushButton("Play")
+        self.play_pause_button.setStyleSheet("font-weight: bold; min-width: 80px; font-size: 12px; padding: 4px;")
+        self.play_pause_button.clicked.connect(self._toggle_play_pause)
+        self.play_pause_button.setVisible(False)  # Hidden by default, shown only in playback mode
+        checkbox_layout.addWidget(self.play_pause_button)
+        
         checkbox_layout.addStretch()
         self.contour_checkbox = QCheckBox("Show contour")
         self.contour_checkbox.setChecked(self.show_contours)
@@ -125,6 +134,16 @@ class VideoWidget(QWidget):
             video_thread: VideoThread instance to control
         """
         self.video_thread = video_thread
+        
+        # Set initial visibility and button text based on thread's paused state
+        is_playback = isinstance(video_thread.camera_index, str)
+        if hasattr(self, 'play_pause_button'):
+            self.play_pause_button.setVisible(is_playback)
+            if is_playback:
+                if self.video_thread.paused:
+                    self.play_pause_button.setText("Play")
+                else:
+                    self.play_pause_button.setText("Pause")
         
         # Extract mask from video thread if available
         if hasattr(video_thread, 'mask_coords') and video_thread.mask_coords is not None:
@@ -201,6 +220,16 @@ class VideoWidget(QWidget):
             new_mode = 'binary' if state == Qt.CheckState.Checked.value else 'grayscale'
             self.video_thread.mode = new_mode
 
+    def _toggle_play_pause(self):
+        """Toggle play/pause state of the video thread."""
+        if self.video_thread is not None:
+            new_paused = not self.video_thread.paused
+            self.video_thread.paused = new_paused
+            if new_paused:
+                self.play_pause_button.setText("Play")
+            else:
+                self.play_pause_button.setText("Pause")
+
     def display_frame(self, frame, points=(), initzone=None, mask=None, contour=None):
         """
         Converts a grayscale frame to a QPixmap and displays it in the video label.
@@ -226,17 +255,20 @@ class VideoWidget(QWidget):
         convert_to_qt_format = QImage(frame.data, w, h, bytes_per_line, img_format)
         p = convert_to_qt_format.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio)
         pixmap = QPixmap.fromImage(p)
-        #print(roi[2]); print('------------------------')
-        #print(points); print('------------------------')
+        
+        # Calculate scale factor between original frame and the scaled QPixmap
+        scale_x = p.width() / float(w) if w > 0 else 1.0
+        scale_y = p.height() / float(h) if h > 0 else 1.0
+        
         if initzone is not None and len(initzone):
-            self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=IZ_COLOR) # SkyBlue
+            self.add_circular_roi(pixmap, initzone[:2], initzone[2], color=IZ_COLOR, scale_x=scale_x, scale_y=scale_y) # SkyBlue
         if mask is not None and len(mask):
-            self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240))
-            #self.add_rectangular_roi(pixmap, mask)
+            self.add_circular_roi(pixmap, mask[:2], mask[2], color=(240,240,240), scale_x=scale_x, scale_y=scale_y)
         
         # Draw contour if enabled and provided
         if self.show_contours and contour is not None:
-            self.add_contour(pixmap, contour)
+            self.add_contour(pixmap, contour, scale_x=scale_x, scale_y=scale_y)
+            self.add_contour_axes(pixmap, contour, scale_x=scale_x, scale_y=scale_y)
         
         # Update first point trail with new first point
         if points and points[0][0] > 0:
@@ -248,16 +280,16 @@ class VideoWidget(QWidget):
         # Draw centroids based on internal show_trail setting
         if self.show_trail:
             # Draw the first point trail
-            self.add_first_point_trail(pixmap)
+            self.add_first_point_trail(pixmap, scale_x=scale_x, scale_y=scale_y)
         else:
             # Draw only the latest point(s)
             for point in points:
                 if point[0] > 0:
-                    self.add_point(pixmap, point)
+                    self.add_point(pixmap, point, scale_x=scale_x, scale_y=scale_y)
         
         self.video_label.setPixmap(pixmap)
-
-    def add_point(self, pixmap, point):
+ 
+    def add_point(self, pixmap, point, scale_x=1.0, scale_y=1.0):
         """
         Displays the centroid as a red dot on the video label.
         
@@ -268,7 +300,9 @@ class VideoWidget(QWidget):
         painter = QPainter(pixmap)
         painter.setPen(Qt.PenStyle.NoPen)  # No border
         painter.setBrush(QColor(*CENTROID_COLOR))
-        painter.drawEllipse(point[0] - 5, point[1] - 5, 10, 10)
+        px = int(point[0] * scale_x)
+        py = int(point[1] * scale_y)
+        painter.drawEllipse(px - 5, py - 5, 10, 10)
         painter.end()
 
     def update_first_point_trail(self, point):
@@ -283,7 +317,7 @@ class VideoWidget(QWidget):
         if len(self.first_point_trail) > self.max_trail_length:
             self.first_point_trail.pop(0)
 
-    def add_first_point_trail(self, pixmap):
+    def add_first_point_trail(self, pixmap, scale_x=1.0, scale_y=1.0):
         """
         Draws the first point trail with decreasing transparency.
         
@@ -308,7 +342,9 @@ class VideoWidget(QWidget):
             
             # Draw smaller circles for older points, larger for newer ones
             radius = 3 + (ind * 2) // len(self.first_point_trail)
-            painter.drawEllipse(point[0] - radius, point[1] - radius, 
+            px = int(point[0] * scale_x)
+            py = int(point[1] * scale_y)
+            painter.drawEllipse(px - radius, py - radius, 
                               2 * radius, 2 * radius)
         
         painter.end()
@@ -340,7 +376,7 @@ class VideoWidget(QWidget):
         """
         self.show_contours = show
 
-    def add_contour(self, pixmap: QPixmap, contour):
+    def add_contour(self, pixmap: QPixmap, contour, scale_x=1.0, scale_y=1.0):
         """
         Draw a contour on the pixmap.
         
@@ -363,14 +399,78 @@ class VideoWidget(QWidget):
         points = contour.reshape(-1, 2)
         
         # Convert to Qt points and draw
-        qt_points = [QPointF(float(x), float(y)) for x, y in points]
+        qt_points = [QPointF(float(x * scale_x), float(y * scale_y)) for x, y in points]
         polygon = QPolygonF(qt_points)
         painter.drawPolygon(polygon)
         
         painter.end()
 
+    def add_contour_axes(self, pixmap: QPixmap, contour, scale_x=1.0, scale_y=1.0):
+        """
+        Draws the major and minor axes of the contour as lines.
+        """
+        if contour is None or len(contour) < 5:
+            return
+            
+        try:
+            (cx, cy), (d1, d2), angle = cv2.fitEllipse(contour)
+            
+            # Determine major and minor lengths and orientation angle
+            if d1 >= d2:
+                major_len = d1
+                minor_len = d2
+                major_angle = angle + 90
+            else:
+                major_len = d2
+                minor_len = d1
+                major_angle = angle
+            
+            theta_major = math.radians(major_angle)
+            # Direction vector for major axis (clockwise from 12 o'clock)
+            dx_major = math.sin(theta_major)
+            dy_major = -math.cos(theta_major)
+            
+            # Direction vector for minor axis (perpendicular to major axis)
+            theta_minor = math.radians(major_angle + 90)
+            dx_minor = math.sin(theta_minor)
+            dy_minor = -math.cos(theta_minor)
+            
+            # Major axis endpoints
+            x1 = cx - (major_len / 2.0) * dx_major
+            y1 = cy - (major_len / 2.0) * dy_major
+            x2 = cx + (major_len / 2.0) * dx_major
+            y2 = cy + (major_len / 2.0) * dy_major
+            
+            # Minor axis endpoints
+            x3 = cx - (minor_len / 2.0) * dx_minor
+            y3 = cy - (minor_len / 2.0) * dy_minor
+            x4 = cx + (minor_len / 2.0) * dx_minor
+            y4 = cy + (minor_len / 2.0) * dy_minor
+            
+            # Draw lines on pixmap
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Draw major axis (Green / Tango Chameleon Green)
+            painter.setPen(QPen(QColor(138, 226, 52), 2, Qt.PenStyle.SolidLine))
+            painter.drawLine(
+                QPointF(x1 * scale_x, y1 * scale_y),
+                QPointF(x2 * scale_x, y2 * scale_y)
+            )
+            
+            # Draw minor axis (Red / Tango Scarlet Red)
+            painter.setPen(QPen(QColor(239, 41, 41), 2, Qt.PenStyle.SolidLine))
+            painter.drawLine(
+                QPointF(x3 * scale_x, y3 * scale_y),
+                QPointF(x4 * scale_x, y4 * scale_y)
+            )
+            
+            painter.end()
+        except Exception as e:
+            print(f"Error drawing contour axes: {e}")
+
     def add_circular_roi(self, pixmap: QPixmap, center: tuple, radius: int,
-                color: tuple = (32,74,135)) -> QPixmap:
+                color: tuple = (32,74,135), scale_x=1.0, scale_y=1.0) -> QPixmap:
         """
         Draw a circular region of interest on a QPixmap.
         
@@ -387,16 +487,20 @@ class VideoWidget(QWidget):
         painter.setPen(pen)
         #painter.setPen(Qt.GlobalColor.blue)
 
-        rect_x = center[0] - radius
-        rect_y = center[1] - radius
-        diameter = 2 * radius
+        scaled_cx = center[0] * scale_x
+        scaled_cy = center[1] * scale_y
+        scaled_radius = radius * scale_x
 
-        painter.drawEllipse(rect_x, rect_y, diameter, diameter)
+        rect_x = scaled_cx - scaled_radius
+        rect_y = scaled_cy - scaled_radius
+        diameter = 2 * scaled_radius
+
+        painter.drawEllipse(int(rect_x), int(rect_y), int(diameter), int(diameter))
         painter.end()
         #return new_pixmap
 
     def add_rectangular_roi(self, pixmap: QPixmap, roi: tuple,
-                           color: tuple = (255,0,0)) -> QPixmap:
+                           color: tuple = (255,0,0), scale_x=1.0, scale_y=1.0) -> QPixmap:
         """
         Draw a rectangular region of interest on a QPixmap.
         
@@ -412,7 +516,12 @@ class VideoWidget(QWidget):
         painter.setPen(pen)
 
         # Draw rectangle from top-left to bottom-right
-        width = x2 - x1
-        height = y2 - y1
-        painter.drawRect(x1, y1, width, height)
+        scaled_x1 = x1 * scale_x
+        scaled_y1 = y1 * scale_y
+        scaled_x2 = x2 * scale_x
+        scaled_y2 = y2 * scale_y
+
+        width = scaled_x2 - scaled_x1
+        height = scaled_y2 - scaled_y1
+        painter.drawRect(int(scaled_x1), int(scaled_y1), int(width), int(height))
         painter.end()
