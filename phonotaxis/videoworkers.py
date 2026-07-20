@@ -1,3 +1,76 @@
+"""
+Multi-threaded video processing worker classes.
+
+This module provides the individual worker components that make up the
+phonotaxis video-processing pipeline.  Each worker runs in its own
+``threading.Thread`` and communicates with its neighbours through one of
+two thread-safe channels defined in ``resultbus``:
+
+* **ResultBus** (pub/sub) — ``CaptureWorker`` and ``FileCaptureWorker``
+  publish raw frames to a named topic; any number of downstream workers
+  subscribe and receive their own independent ``ResultRingBuffer`` queue.
+
+* **SharedBuffer** (point-to-point) — each ``ProcessWorker`` writes its
+  final ``WorkerResult`` into a dedicated ``SharedBuffer`` so the
+  coordinating thread (e.g. ``VideoThread``) can poll results and emit Qt
+  signals without holding any locks.
+
+Pipeline overview::
+
+    ┌───────────────────────┐   publish('capture')   ┌────────────────────┐
+    │  CaptureWorker  /     │ ─────────────────────► │  ResultBus         │
+    │  FileCaptureWorker    │                         └──────┬─────────────┘
+    └───────────────────────┘                                │ subscribe()
+                                                             ▼
+                                                    ┌────────────────────┐
+                                                    │  ProcessWorker     │
+                                                    │  (+ strategy fn)   │
+                                                    └──────┬─────────────┘
+                                         try_write_result  │     │ publish (optional)
+                                                           ▼     ▼
+                                                    ┌─────────┐  ResultBus
+                                                    │ Shared  │  (for chaining)
+                                                    │ Buffer  │
+                                                    └─────────┘
+                                              ┌───────────────────────┐
+                                              │  RecordWorker         │
+                                              │  (subscribe('capture'))│
+                                              └───────────────────────┘
+
+Classes
+-------
+CaptureWorker
+    Reads frames from a live ``VideoSource`` as fast as the camera allows
+    and publishes each frame as a ``WorkerResult`` to a ``ResultBus``.
+
+FileCaptureWorker
+    Like ``CaptureWorker`` but for file-backed sources.  Supports
+    rate-limiting, looping, pause/resume, and optional back-pressure
+    (``wait_on_full``) to avoid flooding slow downstream subscribers.
+
+ContourTracker
+    Stateful, callable processing strategy.  Applies an optional
+    circular/rectangular mask, inverts and thresholds the frame, and
+    locates the largest dark contour.  Returns a dict with the processed
+    frame, centroid, contour, and orientation.  Designed to be passed as
+    the ``strategy`` argument of ``ProcessWorker``.
+
+ProcessWorker
+    Generic pipeline stage.  Subscribes to a ``ResultBus`` topic, passes
+    each incoming ``WorkerResult`` through an arbitrary ``strategy``
+    callable, and writes the output to a ``SharedBuffer`` for the
+    coordinator.  Optionally re-publishes results to a second ``ResultBus``
+    to enable chained or fan-out processing.
+
+RecordWorker
+    Subscribes to a ``ResultBus`` topic and writes frames to a video file
+    via an ``ffmpeg`` subprocess (hardware-accelerated by default, with a
+    ``libx264`` software fallback).  Recording can be started and stopped
+    independently of the worker's run-loop.
+
+No Qt dependencies — all classes are pure Python and suitable for use
+outside a GUI context (e.g. benchmarks, unit tests).
+"""
 import time
 import queue
 import cv2
@@ -5,8 +78,8 @@ import numpy as np
 import subprocess
 import threading
 from typing import Callable, List, Optional
-from .sharedbuffer import ResultBuffer
-from .resultbus import WorkerResult, ResultBus, ResultRingBuffer
+from .resultbus import WorkerResult, ResultBus, ResultRingBuffer, SharedBuffer
+
 from .videosource import VideoSource
 
 
@@ -182,7 +255,7 @@ class FileCaptureWorker:
 
 class ContourTracker:
     """Stateful strategy for contour-based dark-object tracking."""
-    def __init__(self, threshold: int, minarea: int, tracking: bool = True):
+    def __init__(self, threshold: int, minarea: int, tracking: bool = True, blur_sigma: float = 3.0):
         self.threshold: int = threshold
         self.minarea: int = minarea
         self.tracking: bool = tracking
@@ -191,6 +264,7 @@ class ContourTracker:
         self.mode: str = 'grayscale'
         self._cached_mask = None
         self._cached_key = None
+        self.blur_sigma: float = blur_sigma
 
     def set_circular_mask(self, coords):
         self.mask_coords = coords
@@ -273,7 +347,7 @@ class ContourTracker:
         max_value = 255
         inverted_frame = cv2.bitwise_not(masked_frame)
         
-        blurred = cv2.GaussianBlur(inverted_frame, (15, 15), 0)
+        blurred = cv2.GaussianBlur(inverted_frame, (0, 0), self.blur_sigma)
         ret, binary_frame = cv2.threshold(blurred, max_value - self.threshold,
                                           max_value, cv2.THRESH_BINARY)
         
@@ -320,11 +394,11 @@ class ContourTracker:
 
 
 class ProcessWorker:
-    """Generic video-pipeline worker subscribing to ResultBus and writing to ResultBuffer."""
+    """Generic video-pipeline worker subscribing to ResultBus and writing to SharedBuffer."""
     def __init__(
         self,
         strategy: Callable,
-        result_buffer: ResultBuffer,
+        result_buffer: SharedBuffer,
         *,
         name: str = 'worker',
         bus: ResultBus,
