@@ -7,15 +7,30 @@ A paradigm is a standalone Python script containing a PyQt6 GUI that orchestrate
 ---
 
 ## Table of Contents
-1. [Paradigm Architecture Overview](#paradigm-architecture-overview)
-2. [Structure of a Paradigm File](#structure-of-a-paradigm-file)
-3. [Lifecycle Methods](#lifecycle-methods)
-4. [Defining GUI Parameters & Widgets](#defining-gui-parameters--widgets)
-5. [Setting Up Hardware & Video Interfaces](#setting-up-hardware--video-interfaces)
-6. [Managing Trials and the State Matrix](#managing-trials-and-the-state-matrix)
-7. [Integrating Custom Video/Analysis Workers](#integrating-custom-videoanalysis-workers)
-8. [Data Persistence & HDF5 Saving](#data-persistence--hdf5-saving)
-9. [Complete Annotated Example](#complete-annotated-example)
+1. [Concepts](#concepts)
+2. [Paradigm Architecture Overview](#paradigm-architecture-overview)
+3. [Structure of a Paradigm File](#structure-of-a-paradigm-file)
+4. [Lifecycle Methods](#lifecycle-methods)
+5. [Defining GUI Parameters & Widgets](#defining-gui-parameters--widgets)
+6. [Setting Up Hardware & Video Interfaces](#setting-up-hardware--video-interfaces)
+7. [Managing Trials and the State Matrix](#managing-trials-and-the-state-matrix)
+8. [Integrating Custom Video/Analysis Workers](#integrating-custom-videoanalysis-workers)
+9. [Data Persistence & HDF5 Saving](#data-persistence--hdf5-saving)
+10. [Complete Annotated Example](#complete-annotated-example)
+
+---
+
+## Concepts
+
+| Term | Meaning |
+|------|---------|
+| **Paradigm** | A single Python file (or class) that defines one experiment type |
+| **Trial** | The smallest repeatable unit of an experiment |
+| **State matrix** | A table that encodes which state to jump to for every possible event |
+| **State** | A named moment in time (e.g., `wait_for_poke`, `reward_left`) |
+| **Event** | Something that can change the state — an animal entering a zone, poking a port, or a timer expiring |
+| **Output** | Something the computer controls — a water valve, an LED, a speaker |
+| **Integer output** | A numeric code emitted when entering a state, used to trigger sounds |
 
 ---
 
@@ -25,7 +40,7 @@ The `phonotaxis` framework uses a unified coordinator/model layout. A paradigm s
 
 The `SessionController` coordinates the real-time execution of the state machine, hardware interfaces, and logs. Your paradigm class is responsible for defining *what* happens in each trial and presenting parameters/plots to the user in a GUI.
 
-### The Trial Loop
+### The Session Lifecycle and Trial Loop
 
 ```
 start_session() [User clicks Start]
