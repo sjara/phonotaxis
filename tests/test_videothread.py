@@ -438,3 +438,32 @@ def test_process_worker_latest_only():
     t.join(timeout=2.0)
     
     assert processed == [1, 4]
+
+
+def test_cv2_video_source_parameters():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, "test.avi")
+        create_dummy_video(video_path, fps=30, num_frames=5)
+        
+        source = CV2VideoSource(video_path)
+        
+        # Test parameter caching when closed
+        assert source.set_fps(60.0) is False
+        assert source.set_exposure(100.0) is False
+        assert source.set_gain(10.0) is False
+        
+        assert source._target_fps == 60.0
+        assert source._target_exposure == 100.0
+        assert source._target_gain == 10.0
+        
+        # Open source and verify they are cached
+        assert source.open() is True
+        
+        # Note: OpenCV's file backend might not physically update/support FPS, exposure, or gain settings
+        # on video files, but the method call should execute without raising.
+        # We can test that the setters run when open:
+        source.set_fps(45.0)
+        assert source._target_fps == 45.0
+        
+        source.release()
+
