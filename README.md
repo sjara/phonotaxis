@@ -22,12 +22,9 @@ A framework for developing behavioral tasks that use video tracking and sound pl
         * From the `phonotaxis` folder, install the package and its dependencies:
           `pip install -e .`
         * Next time, just run `workon phonotaxis` to activate it again.
-    * **Linux (Ubuntu), alternative:** using [uv](https://github.com/astral-sh/uv).
-        * Install system dependencies: `sudo apt install pipx libasound2-dev portaudio19-dev`
-        * Install uv (without running a shell script from the web):
-          `pipx install uv`
-        * From the `phonotaxis` folder: `uv venv` then `source .venv/bin/activate`.
-        * Install the package and its dependencies: `uv pip install -e .`
+3. Grant serial port access for Arduino communication (Linux only):
+    * `sudo usermod -aG dialout $USER`
+    * Log out and back in (or reboot) for the change to take effect.
 4. Create a config file (based on the template):
     * Make a copy of `config_template.py` and call it `config.py`.
     * Edit your config.py file if necessary.
@@ -35,6 +32,14 @@ A framework for developing behavioral tasks that use video tracking and sound pl
     * `python examples/example_gui_minimal.py`
     * You should see a window with minimal text on it.
 6. For additional examples, see `examples/README.md`.
+
+## INSTALLATION (Linux, alternative: using uv)
+This section describes how to install only the packages using [uv](https://github.com/astral-sh/uv) instead of `virtualenvwrapper`.
+1. Install system dependencies: `sudo apt install pipx libasound2-dev portaudio19-dev`
+2. Install uv (without running a shell script from the web):
+   `pipx install uv`
+3. From the `phonotaxis` folder: `uv venv` then `source .venv/bin/activate`.
+4. Install the package and its dependencies: `uv pip install -e .`
 
 ## CONTENTS
 * `phonotaxis`: core modules.
